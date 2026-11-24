@@ -1,0 +1,9 @@
+pid 75904 open True err 0
+base 0x7ff72d3f0000 ptr 0x0 len 0x0
+GT1G0 0
+_N1G0 0
+_A2G0 0
+_A1G0 0
+file_encrypt_key 1
+contexts 0
+0x7ff730759ab0 file_encrypt_key 66696c655f656e63727970745f6b65790000000000000000

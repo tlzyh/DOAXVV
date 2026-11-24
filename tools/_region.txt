@@ -1,0 +1,3 @@
+ptr 0x99dc34a0
+base 0x99dc3000 size 0xb7b3d000 state 0x1000 prot 0x4 type 0x20000
+bytes 57556571303332464a6e4c4255426d57 got 16
