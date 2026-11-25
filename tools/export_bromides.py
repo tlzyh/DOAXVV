@@ -16,7 +16,7 @@ from decrypt import SEED, iter_pages
 ROOT = r"E:\Games\DMM\DOAX-VenusVacation\DX11_data"
 LIST = r"D:\Projects\YangHui\DOAXVV\tools\_bromide_list.csv"
 OUT_DIR = r"D:\Projects\YangHui\DOAXVV\export\bromide"
-KNOWN_PNG = r"D:\Projects\YangHui\DOAXVV\export\BROMIDE_OWN_ZA_91_A_LUN.png"
+KNOWN_PNG = r"D:\Projects\YangHui\DOAXVV\export\bromide\BROMIDE_OWN_ZA_91_A_LUN.png"
 SEED_U8 = np.frombuffer(SEED, dtype=np.uint8)
 MARKER = np.array([0xFF, 0xFF, 0x00, 0x00], dtype=np.uint8)
 
@@ -58,7 +58,9 @@ def decode_dxt1(blocks, width, height):
     col1 = rgb565(c1)
     four = c0 > c1
     col2 = np.where(four[:, None], (2 * col0 + col1) // 3, (col0 + col1) // 2)
-    col3 = np.where(four[:, None], (col0 + 2 * col1) // 3, 0)
+    # Equal endpoints still take the four-color path's last index in these
+    # files. Leaving that index transparent paints the black specks.
+    col3 = np.where(four[:, None], (col0 + 2 * col1) // 3, (col0 + col1) // 2)
     colors = np.stack([col0, col1, col2, col3], axis=1)
     shifts = np.arange(16, dtype=np.uint32) * 2
     index = (bits[:, None] >> shifts) & 3
@@ -71,7 +73,7 @@ def decode_dxt1(blocks, width, height):
 
 
 def dxt_blocks(body):
-    """Each record is 16 bytes: eight DXT1 bytes, a ffff0000 marker, and four pad bytes."""
+    """Each record is 16 bytes: eight contiguous DXT1 bytes, a ffff0000 marker, and four pad bytes."""
     raw = np.frombuffer(body, dtype=np.uint8)
     best = None
     chosen = None
@@ -81,11 +83,12 @@ def dxt_blocks(body):
         if count < 16:
             continue
         view = span[:count * 16].reshape(count, 16)
-        for at in range(13):
+        # The color bytes have to sit in one run. A wrapped run mixes two blocks and ghosts the picture.
+        for at in range(8, 13):
             ratio = float(np.all(view[:, at:at + 4] == MARKER, axis=1).mean())
             if ratio < 0.99:
                 continue
-            dxt_index = np.arange(at - 8, at) % 16
+            dxt_index = np.arange(at - 8, at)
             used = np.zeros(16, dtype=bool)
             used[dxt_index] = True
             used[at:at + 4] = True
@@ -93,11 +96,24 @@ def dxt_blocks(body):
             score = (ratio, pad_zero)
             if best is None or score > best:
                 best = score
-                chosen = (shift, dxt_index, view)
+                chosen = view[:, dxt_index]
     if chosen is None:
         raise ValueError("no aligned blocks")
-    _shift, dxt_index, view = chosen
-    return view[:, dxt_index]
+    return chosen
+
+
+def align_rows(blocks, block_w=480):
+    """Each row stores its left 196 pixels at the end of the row."""
+    rows = len(blocks) // block_w
+    if rows < 1:
+        return blocks
+    grid = blocks[:rows * block_w].reshape(rows, block_w, 8)
+    moved = np.roll(grid, 49, axis=1)
+    tail = blocks[rows * block_w:]
+    if len(tail):
+        pad = np.zeros((49, blocks.shape[1]), dtype=blocks.dtype)
+        tail = np.concatenate([pad, tail], axis=0)
+    return np.concatenate([moved.reshape(-1, blocks.shape[1]), tail], axis=0)
 
 
 def decode_file(path, key):
@@ -107,23 +123,38 @@ def decode_file(path, key):
     kind, width, height = image_info(pages[0])
     if kind != 3 or width == 0 or height == 0 or width % 4 or height % 4:
         raise ValueError(f"header {kind} {width}x{height}")
-    blocks = dxt_blocks(b"".join(pages[1:]))
+    blocks = align_rows(dxt_blocks(b"".join(pages[1:])))
     image, used = decode_dxt1(blocks, width, height)
     return image, width, height, used
 
 
+def punch_pixels(blocks):
+    raw = blocks.astype(np.uint32)
+    c0 = raw[:, 0] | (raw[:, 1] << 8)
+    c1 = raw[:, 2] | (raw[:, 3] << 8)
+    bits = raw[:, 4] | (raw[:, 5] << 8) | (raw[:, 6] << 16) | (raw[:, 7] << 24)
+    index = (bits[:, None] >> (np.arange(16, dtype=np.uint32) * 2)) & 3
+    return int(((c0 <= c1)[:, None] & (index == 3)).sum())
+
+
 def export_one(job):
-    folder, name, digest, key, dest = job
+    folder, name, digest, key, dest, only_speckled = job
     path = os.path.join(ROOT, folder, digest)
     try:
-        image, width, height, used = decode_file(path, bytes.fromhex(key))
+        pages = [page for _pos, page in iter_pages(decrypt_np(open(path, "rb").read(), bytes.fromhex(key)))]
+        blocks = align_rows(dxt_blocks(b"".join(pages[1:])))
+        specks = punch_pixels(blocks)
+        if only_speckled and specks == 0:
+            return name, 0, 0, 0, "skip"
+        kind, width, height = image_info(pages[0])
+        image, used = decode_dxt1(blocks, width, height)
         Image.fromarray(image, "RGB").save(dest, compress_level=1)
         return name, width, height, used, ""
     except Exception as exc:
         return name, 0, 0, 0, str(exc)
 
 
-def load_jobs(limit):
+def load_jobs(limit, only_speckled=False):
     rows = list(csv.DictReader(open(LIST, encoding="utf-8")))
     rows.sort(key=lambda row: (row["name"], row["folder"], row["hash"]))
     if limit:
@@ -136,7 +167,7 @@ def load_jobs(limit):
         if filename in seen:
             filename = f"{base}__{row['hash'][:8]}.png"
         seen.add(filename)
-        jobs.append((row["folder"], row["name"], row["hash"], row["key"], os.path.join(OUT_DIR, filename)))
+        jobs.append((row["folder"], row["name"], row["hash"], row["key"], os.path.join(OUT_DIR, filename), only_speckled))
     return jobs
 
 
@@ -156,28 +187,35 @@ def main():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--only-speckled", action="store_true")
+    parser.add_argument("--rewrite", action="store_true")
     args = parser.parse_args()
-    check_known()
     if args.check_only:
+        check_known()
         return
     os.makedirs(OUT_DIR, exist_ok=True)
-    jobs = load_jobs(args.limit)
-    pending = [job for job in jobs if not os.path.exists(job[4])]
+    jobs = load_jobs(args.limit, args.only_speckled)
+    pending = jobs if args.only_speckled or args.rewrite else [job for job in jobs if not os.path.exists(job[4])]
     print("jobs", len(jobs), "pending", len(pending), flush=True)
     ok = 0
+    skipped = 0
     failed = []
     blocks = []
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         for index, (name, width, height, used, error) in enumerate(pool.map(export_one, pending, chunksize=2), 1):
-            if error:
+            if error == "skip":
+                skipped += 1
+            elif error:
                 failed.append((name, error))
                 print("fail", name, error, flush=True)
             else:
                 ok += 1
                 blocks.append(used)
-            if index % 50 == 0 or index == len(pending):
-                print("done", index, "/", len(pending), flush=True)
-    print("wrote", ok, "failed", len(failed), "dir", OUT_DIR)
+                if args.only_speckled:
+                    print("fixed", name, flush=True)
+            if index % 100 == 0 or index == len(pending):
+                print("done", index, "/", len(pending), "fixed", ok, flush=True)
+    print("wrote", ok, "skipped", skipped, "failed", len(failed), "dir", OUT_DIR)
     if blocks:
         print("blocks min", min(blocks), "max", max(blocks))
     if failed:
