@@ -2,7 +2,7 @@
 """Render a front view of an exported .glb in Blender (background mode).
 
   blender -b -P tools\\blender_preview.py -- <out.png> <model.glb> [<model.glb> ...] [--show-brk] [--side]
-                                         [--frame=N]
+                                         [--frame=N] [--top]
 
 Objects whose name contains _brk (torn variants) are hidden unless --show-brk;
 helper meshes (shadow proxies, sweat, face paint) are always hidden.
@@ -24,7 +24,11 @@ def main():
     bpy.ops.wm.read_factory_settings(use_empty=True)
     for glb in glbs:
         bpy.ops.import_scene.gltf(filepath=glb)
-    meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
+    bone_shapes = {bone.custom_shape for obj in bpy.context.scene.objects if obj.type == "ARMATURE"
+                   for bone in obj.pose.bones if bone.custom_shape}
+    for shape in bone_shapes:
+        shape.hide_render = True
+    meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj not in bone_shapes]
     helpers = ("SHADOW_MODEL", "zdmodel", "sweat", "face_paint")
     for obj in meshes:
         if (not show_brk and "_brk" in obj.name) or any(h in obj.name for h in helpers):
@@ -57,7 +61,11 @@ def main():
     camera = bpy.data.objects.new("camera", bpy.data.cameras.new("camera"))
     camera.data.type = "ORTHO"
     camera.data.ortho_scale = size * 1.1
-    if "--side" in flags:
+    camera.data.clip_end = size * 10
+    if "--top" in flags:
+        camera.location = center + Vector((0, 0, size * 3))
+        camera.rotation_euler = (0, 0, 0)
+    elif "--side" in flags:
         camera.location = center + Vector((size * 3, 0, 0))
         camera.rotation_euler = (math.radians(90), 0, math.radians(90))
     else:

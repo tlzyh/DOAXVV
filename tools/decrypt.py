@@ -10,6 +10,7 @@ stream, padded to 16 bytes, then the next page.
 import argparse
 import os
 import re
+import struct
 import sys
 import zlib
 
@@ -19,6 +20,7 @@ SEED_PATH = os.path.join(os.path.dirname(__file__), "_seed_live.bin")
 SEED = open(SEED_PATH, "rb").read()
 _SEED = np.frombuffer(SEED, dtype=np.uint8)
 ZLIB_SECOND = (0x01, 0x5E, 0x9C, 0xDA)
+PAGE = 0x4000
 
 
 def key_from_index(index):
@@ -70,6 +72,13 @@ def decrypt(data, key, seed=None):
 def iter_pages(plain):
     pos = 0
     while pos + 6 <= len(plain):
+        stored = struct.unpack_from("<I", plain, pos)[0]
+        if (plain[pos + 4] != 0x78 or plain[pos + 5] not in ZLIB_SECOND) and stored == PAGE \
+                and pos + 4 + stored <= len(plain):
+            # incompressible page: u32 length 0x4000, then the bytes as they are
+            yield pos, plain[pos + 4:pos + 4 + stored]
+            pos = (pos + 4 + stored + 15) & ~15
+            continue
         if plain[pos + 4] != 0x78 or plain[pos + 5] not in ZLIB_SECOND:
             nxt = (pos + 16) & ~15
             if nxt <= pos or nxt + 6 > len(plain):

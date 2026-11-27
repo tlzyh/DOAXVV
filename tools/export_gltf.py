@@ -4,6 +4,7 @@
   python tools\\export_gltf.py --name KAS_MIS_za_16_a
   python tools\\export_gltf.py --all [--workers 8] [--no-textures] [--dds]
   python tools\\export_gltf.py --name KAS_MIS_za_16_a --motion fe23605cfac8 --clip 1 [--fps 60]
+  python tools\\export_gltf.py --name KAS_MIS_za_16_a --name 3dfbeda0 --motion fe23605cfac8:1 --motion 0f64ff100d53:5
 
 Each model becomes out\\models\\<group>\\<name>.glb with its textures decoded to
 PNG in out\\models\\<group>\\<name>_tex\\ (--dds also keeps the BC7 originals).
@@ -163,7 +164,8 @@ def motion_targets(tmc, motion):
     """{motion node: TMC node}, or {} if the model lacks the motion's bones.
 
     A motion drives the subtree under the TMC node named like its root, sorted
-    by bone name (MOT00_Hips .. MOT20_RightToe, OPT_Hand_Left_Index1 ..). When
+    by lower-cased bone name (MOT00_Hips .. MOT20_RightToe, OPT_Face_c_eyebrow ..
+    OPT_Face_r_nose_d, OPT_Face_Root). When
     that subtree holds more bones (the body under MOT00_Hips), only names with
     the root's leading letters (MOT) count.
     """
@@ -178,7 +180,7 @@ def motion_targets(tmc, motion):
     if len(group) != motion.node_count:
         prefix = re.match(r"[A-Za-z]*", motion.name).group(0)
         group = [i for i in group if tmc.nodes[i].name.startswith(prefix)]
-    group.sort(key=lambda i: tmc.nodes[i].name)
+    group.sort(key=lambda i: tmc.nodes[i].name.lower())
     if len(group) != motion.node_count:
         return {}
     position = {index: number for number, index in enumerate(group)}
@@ -244,10 +246,14 @@ def add_animations(gltf, tmc, animations):
         for motion, channels in banks:
             targets = motion_targets(tmc, motion)
             if targets:
+                # Expressions move face bones; the face rig shares the model's proportions.
+                expression = motion.name.startswith("OPT_Face")
                 for i, node in targets.items():
                     if tmc.nodes[node].parent < 0:
                         ratio = leg_ratio(tmc, targets, channels)
                         track(node, "translation", channels[:, i, 0:3] * ratio, "VEC3")
+                    elif expression:
+                        track(node, "translation", channels[:, i, 0:3], "VEC3")
                     track(node, "rotation", euler_to_quat(channels[:, i, 3:6]), "VEC4")
                     track(node, "scale", channels[:, i, 6:9], "VEC3")
             elif rig is not None and rig["motion"] is motion:
@@ -441,12 +447,13 @@ def pair_tmcl(tmc, candidates, rank=0):
     return view, row, len(matches)
 
 
-def load_animations(prefix, clips, fps):
-    """[(name, [(motion, channels (frames, nodes, 9))], fps)] for the chosen clips.
+def load_bank_clips(spec, default_clips):
+    """'HASH[:1,2|all]' -> [(name, [(motion, channels (frames, nodes, 9))])], one entry per clip.
 
-    Every multi-bone motion bank in the char_dat (body, or left + right hand)
-    contributes the same clip index to one glTF animation.
+    Every multi-bone motion bank in the char_dat (body, left + right hand, or
+    face) contributes the same clip index.
     """
+    prefix, _sep, clip_text = spec.partition(":")
     rows = [row for row in csv.DictReader(open(INDEX, encoding="utf-8"))
             if row["magic"] == "char_dat" and len(prefix) >= 8 and row["hash"].startswith(prefix)]
     if not rows:
@@ -454,8 +461,12 @@ def load_animations(prefix, clips, fps):
     banks = [m for m in motions(read_inflated(rows[0])) if m.node_count > 1]
     if not banks:
         raise SystemExit("%s holds no character motion" % prefix)
-    if not clips:
-        clips = [next((c for c in range(len(banks[0].clips)) if banks[0].clip_frames(c) > 1), 0)]
+    if clip_text == "all":
+        clips = list(range(len(banks[0].clips)))
+    elif clip_text:
+        clips = [int(c) for c in clip_text.split(",")]
+    else:
+        clips = default_clips or [next((c for c in range(len(banks[0].clips)) if banks[0].clip_frames(c) > 1), 0)]
     out = []
     for clip in clips:
         chosen = []
@@ -463,7 +474,38 @@ def load_animations(prefix, clips, fps):
             if clip < len(bank.clips):
                 frames = bank.clip_frames(clip) + 1
                 chosen.append((bank, bank.channels(np.arange(frames), clip)))
-        out.append(("%s_%d" % (rows[0]["hash"][:8], clip), chosen, fps, None))
+        out.append(("%s_%d" % (rows[0]["hash"][:8], clip), chosen))
+    return out
+
+
+def add_partners(specs):
+    """Append the hand / breast files paired with each body file in out\\motion_sets.csv (unique pairs only)."""
+    sets = os.path.join(os.path.dirname(OUT), "motion_sets.csv")
+    if not os.path.exists(sets):
+        raise SystemExit("run tools\\pair_motion.py first")
+    rows = list(csv.DictReader(open(sets, encoding="utf-8")))
+    out = list(specs)
+    for spec in specs:
+        prefix, sep, clips = spec.partition(":")
+        row = next((r for r in rows if any(h.startswith(prefix) for h in r["body"].split())), None)
+        if row is None:
+            continue
+        if len(row["body"].split()) != 1:
+            print("body motion %s shares its clip lengths with other bodies; no partners added" % prefix)
+            continue
+        for kind in ("hand", "breast", "hips"):
+            if len(row[kind].split()) == 1:
+                out.append(row[kind][:16] + sep + clips)
+    return out
+
+
+def load_animations(specs, default_clips, fps):
+    """[(name, banks, fps, rig)]; the k-th clip of every --motion plays together as animation k."""
+    per_spec = [load_bank_clips(spec, default_clips) for spec in specs]
+    out = []
+    for k in range(max(len(clips) for clips in per_spec)):
+        parts = [clips[k] for clips in per_spec if k < len(clips)]
+        out.append(("+".join(name for name, _banks in parts), [b for _name, banks in parts for b in banks], fps, None))
     return out
 
 
@@ -473,7 +515,7 @@ def attach_rig(animations, rows):
         body = Tmc(read_inflated(row))
         rigs = [next((build_rig(body, m, c) for m, c in banks if m.node_count == 21), None)
                 for _name, banks, _fps, _rig in animations]
-        if all(rig is not None for rig in rigs):
+        if any(rig is not None for rig in rigs):
             return [(name, banks, fps, rig) for (name, banks, fps, _old), rig in zip(animations, rigs)]
     return animations
 
@@ -513,13 +555,21 @@ def main():
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--no-textures", action="store_true")
     parser.add_argument("--skip-existing", action="store_true", help="keep .glb files that are already exported")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="with --all: only redo models whose pairing.csv result is not ok, keep the rest")
     parser.add_argument("--dds", action="store_true", help="also keep the original BC7 DDS next to each PNG")
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
-    parser.add_argument("--motion", help="char_dat hash prefix (>= 8 chars) holding a character motion bank")
+    parser.add_argument("--motion", action="append", default=[],
+                        help="char_dat hash prefix (>= 8 chars), optionally :CLIP[,CLIP..] or :all (repeatable; "
+                             "the k-th clips of all --motion play together)")
     parser.add_argument("--clip", type=int, action="append", default=[],
                         help="clip index in the motion bank (repeatable; default: first clip longer than 1 frame)")
     parser.add_argument("--fps", type=float, default=60.0, help="motion frames per second (default 60)")
+    parser.add_argument("--paired", action="store_true",
+                        help="also load the hand / breast motions paired with each body --motion (motion_sets.csv)")
     args = parser.parse_args()
+    if args.paired:
+        args.motion = add_partners(args.motion)
     animations = load_animations(args.motion, args.clip, args.fps) if args.motion else None
     if animations and args.all:
         parser.error("--motion only works with --name")
@@ -537,6 +587,12 @@ def main():
     variants = collections.defaultdict(list)
     for row in sorted(tmcs, key=lambda r: (r["name"], r["hash"])):
         variants[(row["plain_size"], variant_stem(row["name"]))].append(row["hash"])
+    log = os.path.join(OUT, "pairing.csv")
+    kept = []
+    if args.retry_failed:
+        previous = [tuple(r.values()) for r in csv.DictReader(open(log, encoding="utf-8"))]
+        kept = [r for r in previous if r[6].startswith("ok")]
+        done_hashes = {r[2] for r in kept}
     used = collections.Counter()
     tasks = []
     for row in sorted(chosen, key=lambda r: (r["name"], r["folder"], r["hash"])):
@@ -545,6 +601,8 @@ def main():
         out_name = base if used[base] == 1 else "%s__%s" % (base, row["hash"][:8])
         if animations:
             out_name += "_anim"
+        if args.retry_failed and row["hash"] in done_hashes:
+            continue
         rank = variants[(row["plain_size"], variant_stem(row["name"]))].index(row["hash"])
         tasks.append((row, rank, not args.no_textures, args.dds, out_name, args.skip_existing, animations))
     results = []
@@ -557,14 +615,14 @@ def main():
                 results.append(result)
                 if done % 100 == 0:
                     print("models", done, "/", len(tasks), flush=True)
-    log = ""
     if args.all:
         os.makedirs(OUT, exist_ok=True)
-        log = os.path.join(OUT, "pairing.csv")
         with open(log, "w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(("name", "tmc_folder", "tmc_hash", "tmcl_folder", "tmcl_hash", "tmcl_matches", "result"))
-            writer.writerows(sorted(results))
+            writer.writerows(sorted(kept + [tuple(str(v) for v in r) for r in results]))
+    else:
+        log = ""
     status = collections.Counter(result[6].split(" ")[0] if result[6].startswith("ok") else result[6].split(" (")[0].split(":")[0]
                                  for result in results)
     ambiguous = sum(1 for result in results if result[5] > 1)
