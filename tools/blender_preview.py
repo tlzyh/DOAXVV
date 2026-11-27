@@ -2,10 +2,12 @@
 """Render a front view of an exported .glb in Blender (background mode).
 
   blender -b -P tools\\blender_preview.py -- <out.png> <model.glb> [<model.glb> ...] [--show-brk] [--side]
+                                         [--frame=N]
 
 Objects whose name contains _brk (torn variants) are hidden unless --show-brk;
 helper meshes (shadow proxies, sweat, face paint) are always hidden.
---head frames the camera on the face meshes only.
+--head frames the camera on the face meshes only. --frame=N poses the imported
+animation at scene frame N before rendering.
 """
 import math
 import sys
@@ -30,7 +32,15 @@ def main():
     visible = [obj for obj in meshes if not obj.hide_render]
     if "--head" in flags:
         visible = [obj for obj in visible if "face" in obj.name] or visible
-    corners = [obj.matrix_world @ Vector(c) for obj in visible for c in obj.bound_box]
+    frame = next((int(arg.split("=", 1)[1]) for arg in flags if arg.startswith("--frame=")), None)
+    if frame is not None:
+        bpy.context.scene.frame_set(frame)
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    corners = []
+    for obj in visible:
+        evaluated = obj.evaluated_get(depsgraph)
+        corners.extend(evaluated.matrix_world @ v.co for v in evaluated.to_mesh().vertices)
+        evaluated.to_mesh_clear()
     lo = Vector((min(c.x for c in corners), min(c.y for c in corners), min(c.z for c in corners)))
     hi = Vector((max(c.x for c in corners), max(c.y for c in corners), max(c.z for c in corners)))
     center, size = (lo + hi) / 2, max(hi - lo)

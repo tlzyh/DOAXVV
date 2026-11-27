@@ -3,6 +3,7 @@
 
   python tools\\export_gltf.py --name KAS_MIS_za_16_a
   python tools\\export_gltf.py --all [--workers 8] [--no-textures] [--dds]
+  python tools\\export_gltf.py --name KAS_MIS_za_16_a --motion fe23605cfac8 --clip 1 [--fps 60]
 
 Each model becomes out\\models\\<group>\\<name>.glb with its textures decoded to
 PNG in out\\models\\<group>\\<name>_tex\\ (--dds also keeps the BC7 originals).
@@ -23,6 +24,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 from bcdec import decode_dds, write_png
 from decrypt import inflate_all
+from motion import euler_to_quat, hemisphere, motions, quat_mul, quat_rotate
 from tmc import Tmc, TmclView
 
 ROOT = r"E:\Games\DMM\DOAX-VenusVacation\DX11_data"
@@ -112,13 +114,16 @@ def uv_sets(attrs):
 
 def skin_sets(attrs):
     joints = [attrs[k] for k in sorted(k for k in attrs if k[0] == "joint")]
-    weights = [attrs[k].astype(np.float32) for k in sorted(k for k in attrs if k[0] == "weight")]
+    weights = [np.nan_to_num(attrs[k].astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+               for k in sorted(k for k in attrs if k[0] == "weight")]
     count = min(len(joints), len(weights))
     joints, weights = joints[:count], weights[:count]
     if not count:
         return [], []
     total = np.concatenate(weights, axis=1).sum(1, keepdims=True)
-    total[total == 0] = 1
+    unweighted = total[:, 0] == 0
+    weights[0][unweighted, 0] = 1
+    total[unweighted] = 1
     weights = [w / total for w in weights]
     joints = [np.where(w > 0, j, 0).astype(np.uint8) for j, w in zip(joints, weights)]
     return joints, weights
@@ -137,12 +142,146 @@ def unit(vectors):
     return vectors / length
 
 
-def export_model(tmc, view, glb_path, textures=True, keep_dds=False):
+def matrix_to_quat(m):
+    """Column-vector rotation matrix -> xyzw quaternion."""
+    w = np.sqrt(max(0.0, 1 + m[0, 0] + m[1, 1] + m[2, 2])) / 2
+    x = np.copysign(np.sqrt(max(0.0, 1 + m[0, 0] - m[1, 1] - m[2, 2])) / 2, m[2, 1] - m[1, 2])
+    y = np.copysign(np.sqrt(max(0.0, 1 - m[0, 0] + m[1, 1] - m[2, 2])) / 2, m[0, 2] - m[2, 0])
+    z = np.copysign(np.sqrt(max(0.0, 1 - m[0, 0] - m[1, 1] + m[2, 2])) / 2, m[1, 0] - m[0, 1])
+    q = np.array([x, y, z, w])
+    return q / np.linalg.norm(q)
+
+
+def bind_trs(local):
+    """Row-vector local matrix (S * R * T) -> glTF translation, rotation, scale."""
+    scale = np.linalg.norm(local[:3, :3], axis=1)
+    rotation = matrix_to_quat((local[:3, :3] / np.where(scale == 0, 1, scale)[:, None]).T)
+    return local[3, :3].copy(), rotation, scale
+
+
+def motion_targets(tmc, motion):
+    """{motion node: TMC node}, or {} if the model lacks the motion's bones.
+
+    A motion drives the subtree under the TMC node named like its root, sorted
+    by bone name (MOT00_Hips .. MOT20_RightToe, OPT_Hand_Left_Index1 ..). When
+    that subtree holds more bones (the body under MOT00_Hips), only names with
+    the root's leading letters (MOT) count.
+    """
+    root = next((node for node in tmc.nodes if node.name == motion.name), None)
+    if root is None:
+        return {}
+    group, stack = [], [root.index]
+    while stack:
+        index = stack.pop()
+        group.append(index)
+        stack.extend(tmc.nodes[index].children)
+    if len(group) != motion.node_count:
+        prefix = re.match(r"[A-Za-z]*", motion.name).group(0)
+        group = [i for i in group if tmc.nodes[i].name.startswith(prefix)]
+    group.sort(key=lambda i: tmc.nodes[i].name)
+    if len(group) != motion.node_count:
+        return {}
+    position = {index: number for number, index in enumerate(group)}
+    parents = [position.get(tmc.nodes[index].parent, -1) for index in group]
+    return dict(enumerate(group)) if parents == list(motion.parents) else {}
+
+
+def leg_ratio(tmc, targets, channels):
+    """Model leg length / motion leg length, used to rescale the root translation."""
+    chain = [i for i in targets if tmc.nodes[targets[i]].name.split("_", 1)[-1] in ("LeftUpLeg", "LeftLeg", "LeftFoot")]
+    model = sum(np.linalg.norm(tmc.nodes[targets[i]].local[3, :3]) for i in chain)
+    source = sum(np.linalg.norm(channels[0, i, :3]) for i in chain)
+    return model / source if chain and source > 0 else 1.0
+
+
+def build_rig(body, motion, channels):
+    """World transforms of the motion's bones on a body skeleton, per frame.
+
+    Separate models (hair rooted at MOT01_Head, faces at MOT15_Neck) take these
+    for their root so they follow the body. Bone scale is ignored here.
+    """
+    targets = motion_targets(body, motion)
+    if len(targets) != motion.node_count:
+        return None
+    ratio = leg_ratio(body, targets, channels)
+    local_q = euler_to_quat(channels[:, :, 3:6])
+    frames, count = channels.shape[:2]
+    world_q, world_t = np.zeros((frames, count, 4)), np.zeros((frames, count, 3))
+    done = set()
+    while len(done) < count:
+        for i in range(count):
+            parent = motion.parents[i]
+            if i in done or (parent >= 0 and parent not in done):
+                continue
+            if parent < 0:
+                world_q[:, i], world_t[:, i] = local_q[:, i], channels[:, i, 0:3] * ratio
+            else:
+                bind = np.broadcast_to(body.nodes[targets[i]].local[3, :3], (frames, 3))
+                world_q[:, i] = quat_mul(world_q[:, parent], local_q[:, i])
+                world_t[:, i] = world_t[:, parent] + quat_rotate(world_q[:, parent], bind)
+            done.add(i)
+    return {"motion": motion, "names": [body.nodes[targets[i]].name for i in range(count)],
+            "rotation": hemisphere(world_q), "translation": world_t}
+
+
+def add_animations(gltf, tmc, animations):
+    doc = gltf.doc
+    doc["animations"] = []
+    by_name = {node.name: node.index for node in tmc.nodes}
+    for name, banks, fps, rig in animations:
+        samplers, anim_channels, times = [], [], {}
+
+        def track(node, path, values, kind):
+            frames = len(values)
+            if frames not in times:
+                times[frames] = gltf.accessor((np.arange(frames) / fps).astype(np.float32)[:, None], "SCALAR", FLOAT,
+                                              target=None, bounds=True)
+            samplers.append({"input": times[frames], "interpolation": "LINEAR",
+                             "output": gltf.accessor(values.astype(np.float32), kind, FLOAT, target=None)})
+            anim_channels.append({"sampler": len(samplers) - 1, "target": {"node": node, "path": path}})
+
+        ratio = 1.0
+        for motion, channels in banks:
+            targets = motion_targets(tmc, motion)
+            if targets:
+                for i, node in targets.items():
+                    if tmc.nodes[node].parent < 0:
+                        ratio = leg_ratio(tmc, targets, channels)
+                        track(node, "translation", channels[:, i, 0:3] * ratio, "VEC3")
+                    track(node, "rotation", euler_to_quat(channels[:, i, 3:6]), "VEC4")
+                    track(node, "scale", channels[:, i, 6:9], "VEC3")
+            elif rig is not None and rig["motion"] is motion:
+                for i, bone in enumerate(rig["names"]):
+                    node = by_name.get(bone)
+                    if node is None:
+                        continue
+                    if tmc.nodes[node].parent < 0:
+                        track(node, "translation", rig["translation"][:, i], "VEC3")
+                        track(node, "rotation", rig["rotation"][:, i], "VEC4")
+                    else:
+                        track(node, "rotation", euler_to_quat(channels[:, i, 3:6]), "VEC4")
+        if anim_channels:
+            doc["animations"].append({"name": name, "samplers": samplers, "channels": anim_channels,
+                                      "extras": {"root_scale": float(ratio), "fps": fps}})
+
+
+def export_model(tmc, view, glb_path, textures=True, keep_dds=False, animations=None):
     gltf = GltfBuilder()
     doc = gltf.doc
+    animated = set()
+    for _name, banks, _fps, rig in animations or []:
+        for motion, _channels in banks:
+            animated.update(motion_targets(tmc, motion).values())
+        if rig is not None:
+            animated.update(node.index for node in tmc.nodes if node.name in rig["names"])
     for node in tmc.nodes:
-        entry = {"name": node.name or "node%d" % node.index,
-                 "matrix": [float(v) for v in node.local.reshape(-1)]}
+        entry = {"name": node.name or "node%d" % node.index}
+        if node.index in animated:
+            translation, rotation, scale = bind_trs(node.local)
+            entry.update(translation=[float(v) for v in translation], rotation=[float(v) for v in rotation],
+                         scale=[float(v) for v in scale])
+        else:
+            entry["matrix"] = [float(v) for v in node.local.reshape(-1)]
         if node.children:
             entry["children"] = node.children
         doc["nodes"].append(entry)
@@ -260,6 +399,8 @@ def export_model(tmc, view, glb_path, textures=True, keep_dds=False):
             node["skin"] = len(doc["skins"]) - 1
         doc["nodes"].append(node)
         doc["scenes"][0]["nodes"].append(len(doc["nodes"]) - 1)
+    if animations:
+        add_animations(gltf, tmc, animations)
     os.makedirs(os.path.dirname(glb_path), exist_ok=True)
     gltf.finish(glb_path)
     return {"meshes": len(doc["meshes"]), "textures": len(doc["textures"]), "nodes": len(tmc.nodes)}
@@ -300,6 +441,43 @@ def pair_tmcl(tmc, candidates, rank=0):
     return view, row, len(matches)
 
 
+def load_animations(prefix, clips, fps):
+    """[(name, [(motion, channels (frames, nodes, 9))], fps)] for the chosen clips.
+
+    Every multi-bone motion bank in the char_dat (body, or left + right hand)
+    contributes the same clip index to one glTF animation.
+    """
+    rows = [row for row in csv.DictReader(open(INDEX, encoding="utf-8"))
+            if row["magic"] == "char_dat" and len(prefix) >= 8 and row["hash"].startswith(prefix)]
+    if not rows:
+        raise SystemExit("no char_dat with hash prefix %s" % prefix)
+    banks = [m for m in motions(read_inflated(rows[0])) if m.node_count > 1]
+    if not banks:
+        raise SystemExit("%s holds no character motion" % prefix)
+    if not clips:
+        clips = [next((c for c in range(len(banks[0].clips)) if banks[0].clip_frames(c) > 1), 0)]
+    out = []
+    for clip in clips:
+        chosen = []
+        for bank in banks:
+            if clip < len(bank.clips):
+                frames = bank.clip_frames(clip) + 1
+                chosen.append((bank, bank.channels(np.arange(frames), clip)))
+        out.append(("%s_%d" % (rows[0]["hash"][:8], clip), chosen, fps, None))
+    return out
+
+
+def attach_rig(animations, rows):
+    """Give each animation the world pose of the first chosen body it fully drives."""
+    for row in rows:
+        body = Tmc(read_inflated(row))
+        rigs = [next((build_rig(body, m, c) for m, c in banks if m.node_count == 21), None)
+                for _name, banks, _fps, _rig in animations]
+        if all(rig is not None for rig in rigs):
+            return [(name, banks, fps, rig) for (name, banks, fps, _old), rig in zip(animations, rigs)]
+    return animations
+
+
 CANDIDATES = {}
 
 
@@ -308,7 +486,7 @@ def init_worker(candidates):
 
 
 def export_row(task):
-    row, rank, textures, keep_dds, out_name = task
+    row, rank, textures, keep_dds, out_name, skip_existing, animations = task
     candidates = CANDIDATES
     try:
         tmc = Tmc(read_inflated(row))
@@ -318,8 +496,10 @@ def export_row(task):
     if view is None:
         return (tmc.name, row["folder"], row["hash"], "", "", 0, "no tmcl (%d by size)" % len(candidates.get(tmc.tmcl_size, [])))
     path = os.path.join(OUT, group_of(tmc.name), out_name + ".glb")
+    if skip_existing and os.path.exists(path):
+        return (tmc.name, row["folder"], row["hash"], tmcl_row["folder"], tmcl_row["hash"], matches, "ok skipped")
     try:
-        stats = export_model(tmc, view, path, textures, keep_dds)
+        stats = export_model(tmc, view, path, textures, keep_dds, animations)
     except (KeyError, IndexError, ValueError, struct.error) as exc:
         return (tmc.name, row["folder"], row["hash"], tmcl_row["folder"], tmcl_row["hash"], matches, "export error: %s" % exc)
     note = "ok meshes=%(meshes)d textures=%(textures)d" % stats
@@ -332,9 +512,17 @@ def main():
                         help="TMC resource name or hash prefix of at least 8 chars (repeatable)")
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--no-textures", action="store_true")
+    parser.add_argument("--skip-existing", action="store_true", help="keep .glb files that are already exported")
     parser.add_argument("--dds", action="store_true", help="also keep the original BC7 DDS next to each PNG")
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
+    parser.add_argument("--motion", help="char_dat hash prefix (>= 8 chars) holding a character motion bank")
+    parser.add_argument("--clip", type=int, action="append", default=[],
+                        help="clip index in the motion bank (repeatable; default: first clip longer than 1 frame)")
+    parser.add_argument("--fps", type=float, default=60.0, help="motion frames per second (default 60)")
     args = parser.parse_args()
+    animations = load_animations(args.motion, args.clip, args.fps) if args.motion else None
+    if animations and args.all:
+        parser.error("--motion only works with --name")
     tmcs, tmcl = load_index()
     if args.all:
         chosen = tmcs
@@ -344,6 +532,8 @@ def main():
                   if row["name"] in wanted or any(len(w) >= 8 and row["hash"].startswith(w) for w in wanted)]
         if not chosen:
             parser.error("no TMC named %s in index.csv" % ", ".join(sorted(wanted)) if wanted else "give --name or --all")
+    if animations:
+        animations = attach_rig(animations, chosen)
     variants = collections.defaultdict(list)
     for row in sorted(tmcs, key=lambda r: (r["name"], r["hash"])):
         variants[(row["plain_size"], variant_stem(row["name"]))].append(row["hash"])
@@ -353,8 +543,10 @@ def main():
         base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["name"]) or row["hash"][:16]
         used[base] += 1
         out_name = base if used[base] == 1 else "%s__%s" % (base, row["hash"][:8])
+        if animations:
+            out_name += "_anim"
         rank = variants[(row["plain_size"], variant_stem(row["name"]))].index(row["hash"])
-        tasks.append((row, rank, not args.no_textures, args.dds, out_name))
+        tasks.append((row, rank, not args.no_textures, args.dds, out_name, args.skip_existing, animations))
     results = []
     if len(tasks) == 1 or args.workers == 1:
         init_worker(tmcl)

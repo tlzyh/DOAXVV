@@ -16,7 +16,7 @@ import numpy as np
 # GeoDecl element types: (numpy dtype, component count)
 ELEMENT_TYPES = {
     0x00: ("<f4", 1), 0x01: ("<f4", 2), 0x02: ("<f4", 3), 0x03: ("<f4", 4),
-    0x04: ("u1", 4), 0x05: ("u1", 4), 0x08: ("u1", 4),
+    0x04: ("u1", 4), 0x05: ("u1", 4), 0x08: ("u1", 4), 0x0D: ("u1", 4),
     0x0A: ("<f2", 2), 0x0B: ("<f2", 4),
 }
 USAGE_NAMES = {0: "position", 1: "weight", 2: "joint", 3: "normal", 5: "uv", 6: "tangent", 10: "color"}
