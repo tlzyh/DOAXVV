@@ -36,6 +36,8 @@ add_executable(doaxvv_viewer WIN32
   src/gltf_model.cpp
   src/motion.cpp
   src/character.cpp
+  src/game_renderer.cpp
+  src/game_scene.cpp
   src/renderer.cpp
   src/ui.cpp
   src/third_party_impl.cpp)

@@ -81,14 +81,17 @@ void draw_skeleton(const AppState& app, const XMMATRIX& view_proj, float width, 
     }
 }
 
-void write_report(const AppState& app, const std::vector<DrawItem>& items, const fs::path& path) {
+void write_report(AppState& app, size_t draw_count, const std::vector<GameDrawItem>& game_items,
+                  const fs::path& path) {
     FILE* f = _wfopen(path.wstring().c_str(), L"w");
     if (!f)
         return;
     std::fprintf(f, "status: %s\nshader: %s\n", app.status.c_str(), app.shader_log.c_str());
+    std::fprintf(f, "render: %s, scene: %s\n", app.render == RenderMode::Game ? "game" : "simple",
+                 app.scene.loaded() ? app.scene.dir.string().c_str() : app.scene_error.c_str());
     std::fprintf(f, "characters %d, motion files %d\n", int(app.catalog.characters.size()),
                  int(app.catalog.motion_files.size()));
-    const Character& character = app.character;
+    Character& character = app.character;
     for (auto& part : character.parts()) {
         int textured = 0;
         for (auto& img : part.model->images)
@@ -102,7 +105,23 @@ void write_report(const AppState& app, const std::vector<DrawItem>& items, const
     std::fprintf(f, "motion set %d, banks %d, clips %d, clip %d frames %d, frame %.1f\n", app.motion_set,
                  int(character.banks().size()), int(character.clip_count()), app.clip,
                  character.clip_count() ? character.clip_frames(size_t(app.clip)) : 0, app.frame);
-    std::fprintf(f, "draw items %d\n", int(items.size()));
+    std::fprintf(f, "draw items %d\n", int(draw_count));
+    // one line per material of the game render mode: family, PBS type and where it came from
+    std::vector<const GameMaterial*> listed;
+    for (auto& item : game_items) {
+        if (std::find(listed.begin(), listed.end(), item.material) != listed.end())
+            continue;
+        listed.push_back(item.material);
+        const GameMaterial& m = *item.material;
+        std::string where;
+        for (auto& part : character.parts())
+            for (auto& mat : part.model->materials)
+                if (&app.scene.material(part, int(&mat - part.model->materials.data())) == item.material)
+                    where = part.glb + " " + mat.name;
+        std::fprintf(f, "game material %s: %s, pbs %s, passes %d, %s\n", where.c_str(), family_name(m.family),
+                     m.pbs >= 0 ? app.scene.pbs[size_t(m.pbs)].name.c_str() : "-", int(m.passes.size()),
+                     m.source.c_str());
+    }
     float top[3] = {0, -1e9f, 0};
     for (auto& s : character.skeleton())
         if (s.to[1] > top[1])
@@ -116,11 +135,15 @@ void write_report(const AppState& app, const std::vector<DrawItem>& items, const
 int main(int argc, char** argv) {
     fs::path out_dir = fs::path(VIEWER_REPO_DIR) / "out";
     fs::path shader_dir = VIEWER_SHADER_DIR;
+    fs::path scene_dir = fs::path(VIEWER_REPO_DIR) / "out" / "renderdoc" / "misaki" / "scene";
+    RenderMode render_mode = RenderMode::Game;
+    int game_view = GameFinal;
+    std::string start_costume, start_hair;  // glb relative to the out folder
     bool force_renderdoc = false;
     // --screenshot renders a few frames, writes the BMP plus a .txt report and exits (for scripted checks)
     fs::path screenshot;
     int start_row = 10, start_motion = -1, start_clip = 0, start_debug = 0, shot_frames = 20;
-    float start_frame = 0;
+    float start_frame = 0, start_fov = 0;
     bool show_ui = true, show_skeleton = false, camera_override = false;
     CameraState camera;
     for (int i = 1; i < argc; ++i) {
@@ -130,6 +153,16 @@ int main(int argc, char** argv) {
             out_dir = fs::path(reinterpret_cast<const char8_t*>(argv[++i]));
         else if (arg == "--shaders" && has_value)
             shader_dir = fs::path(reinterpret_cast<const char8_t*>(argv[++i]));
+        else if (arg == "--scene" && has_value)
+            scene_dir = fs::path(reinterpret_cast<const char8_t*>(argv[++i]));
+        else if (arg == "--costume" && has_value)
+            start_costume = argv[++i];
+        else if (arg == "--hair" && has_value)
+            start_hair = argv[++i];
+        else if (arg == "--render" && has_value)
+            render_mode = std::string(argv[++i]) == "simple" ? RenderMode::Simple : RenderMode::Game;
+        else if (arg == "--game-view" && has_value)
+            game_view = std::atoi(argv[++i]);
         else if (arg == "--renderdoc")
             force_renderdoc = true;
         else if (arg == "--screenshot" && has_value)
@@ -151,7 +184,9 @@ int main(int argc, char** argv) {
             camera.distance = float(std::atof(argv[++i]));
             camera.yaw = float(std::atof(argv[++i]));
             camera.pitch = float(std::atof(argv[++i]));
-        } else if (arg == "--no-ui")
+        } else if (arg == "--fov" && has_value)
+            start_fov = float(std::atof(argv[++i]));
+        else if (arg == "--no-ui")
             show_ui = false;
         else if (arg == "--skeleton")
             show_skeleton = true;
@@ -188,8 +223,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     app.renderer = &renderer;
-    if (!renderer.reload_shaders(app.shader_log) && app.shader_log.empty())
-        app.shader_log = "着色器编译失败";
+    reload_all_shaders(app);
+    app.render = render_mode;
+    app.game_view.debug_view = std::clamp(game_view, 0, int(GameDebugCount) - 1);
+    if (!app.scene.load(scene_dir, renderer, app.scene_error))
+        app.render = RenderMode::Simple;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -215,6 +253,10 @@ int main(int argc, char** argv) {
             if (app.catalog.characters[i].row == start_row)
                 start = i;
         select_character(app, start);
+        if (!start_costume.empty())
+            load_part(app, PartRole::Costume, start_costume);
+        if (!start_hair.empty())
+            load_part(app, PartRole::Hair, start_hair);
         if (start_motion >= 0)
             select_motion(app, start_motion);
     }
@@ -226,12 +268,15 @@ int main(int argc, char** argv) {
     app.view.skeleton = show_skeleton;
     if (camera_override)
         app.camera = camera;
+    if (start_fov > 0)
+        app.camera.fov = start_fov;
     if (!screenshot.empty())
         app.playing = false;
     int frame_number = 0;
 
     std::vector<XMFLOAT4X4> joints;
     std::vector<DrawItem> items;
+    std::vector<GameDrawItem> game_items;
     uint64_t last = SDL_GetTicksNS();
     uint64_t last_poll = last;
     bool running = true;
@@ -247,7 +292,7 @@ int main(int argc, char** argv) {
                 renderer.resize(width, height);
             } else if (e.type == SDL_EVENT_KEY_DOWN && !io.WantCaptureKeyboard) {
                 if (e.key.key == SDLK_F5)
-                    renderer.reload_shaders(app.shader_log);
+                    reload_all_shaders(app);
                 else if (e.key.key == SDLK_F11 && app.renderdoc)
                     app.renderdoc->TriggerCapture();
                 else if (e.key.key == SDLK_SPACE)
@@ -270,7 +315,9 @@ int main(int argc, char** argv) {
         last = now;
         if (now - last_poll > 500'000'000ull) {
             last_poll = now;
-            renderer.poll_shaders(app.shader_log);
+            std::string log;
+            if (renderer.poll_shaders(log))
+                reload_all_shaders(app);
         }
 
         int clips = int(app.character.clip_count());
@@ -317,11 +364,34 @@ int main(int argc, char** argv) {
 
         joints.clear();
         items.clear();
-        app.character.gather(renderer, view, joints, items, v.debug_slot, highlight);
-        renderer.upload_joints(joints);
+        game_items.clear();
         float clear[4] = {v.background[0], v.background[1], v.background[2], 1};
-        renderer.begin_frame(clear);
-        renderer.draw_scene(items, frame, v.wireframe);
+        if (app.render == RenderMode::Game && app.scene.loaded() && app.game.ready()) {
+            app.game.gather(app.character, app.scene, renderer, view, joints, game_items, highlight);
+            renderer.upload_joints(joints);
+            GameFrameConstants game{};
+            XMStoreFloat4x4(&game.view_proj, view_proj);
+            XMStoreFloat4x4(&game.inv_view_proj, XMMatrixInverse(nullptr, view_proj));
+            game.camera_pos = frame.camera_pos;
+            XMFLOAT3 forward;
+            XMStoreFloat3(&forward, XMVector3Normalize(XMVectorSubtract(
+                                        XMVectorSet(cam.target[0], cam.target[1], cam.target[2], 1), eye)));
+            game.camera_forward = XMFLOAT4(forward.x, forward.y, forward.z, 0);
+            app.scene.fill_frame(game);
+            game.depth_param.x = std::max(0.005f, cam.distance * 0.01f);
+            game.depth_param.y = 200.0f;
+            game.depth_param.z = 2 * std::tan(cam.fov * 0.5f);
+            const GameView& g = app.game_view;
+            game.debug_view = uint32_t(g.debug_view);
+            game.flags = (g.normal_maps ? GameUseNormalMaps : 0) | (g.tone_curve ? GameToneCurve : 0) |
+                         (g.bloom ? GameBloom : 0) | (g.sss ? GameSss : 0);
+            app.game.render(renderer, app.scene, game_items, game, v.background);
+        } else {
+            app.character.gather(renderer, view, joints, items, v.debug_slot, highlight);
+            renderer.upload_joints(joints);
+            renderer.begin_frame(clear);
+            renderer.draw_scene(items, frame, v.wireframe);
+        }
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -335,7 +405,8 @@ int main(int argc, char** argv) {
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         if (!screenshot.empty() && ++frame_number == shot_frames) {
             renderer.save_backbuffer(screenshot);
-            write_report(app, items, fs::path(screenshot).replace_extension(".txt"));
+            write_report(app, items.size() + game_items.size(), game_items,
+                         fs::path(screenshot).replace_extension(".txt"));
             running = false;
         }
         renderer.present(app.view.vsync);

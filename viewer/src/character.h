@@ -32,6 +32,14 @@ struct BoneSegment {
     float from[3], to[3];
 };
 
+// one visible primitive of the current pose
+struct PrimitiveDraw {
+    Part* part = nullptr;
+    size_t primitive = 0;
+    uint32_t joint_offset = 0;
+    float depth = 0;  // view depth of the primitive centre
+};
+
 class Character {
 public:
     // empty glb removes the part
@@ -51,6 +59,8 @@ public:
     int clip_frames(size_t clip) const;  // longest bank of that clip
 
     void pose(size_t clip, float frame, bool animate);
+    // appends the joint matrices of the current pose and lists the visible primitives
+    void collect(const DirectX::XMMATRIX& view, std::vector<XMFLOAT4X4>& joints, std::vector<PrimitiveDraw>& draws);
     // fills joint matrices and draw items for the current pose
     void gather(Renderer& renderer, const DirectX::XMMATRIX& view, std::vector<XMFLOAT4X4>& joints,
                 std::vector<DrawItem>& items, int debug_slot, const ModelMaterial* highlight);

@@ -225,8 +225,7 @@ void Character::pose(size_t clip, float frame, bool animate) {
     }
 }
 
-void Character::gather(Renderer& renderer, const XMMATRIX& view, std::vector<XMFLOAT4X4>& joints,
-                       std::vector<DrawItem>& items, int debug_slot, const ModelMaterial* highlight) {
+void Character::collect(const XMMATRIX& view, std::vector<XMFLOAT4X4>& joints, std::vector<PrimitiveDraw>& draws) {
     for (auto& p : parts_) {
         GltfModel& model = *p.model;
         std::vector<int> skin_offset(model.skins.size(), -1);
@@ -247,48 +246,59 @@ void Character::gather(Renderer& renderer, const XMMATRIX& view, std::vector<XMF
                 offset = uint32_t(joints.size());
                 joints.push_back(p.world[prim.node]);
             }
-            DrawItem item;
-            item.vertices = prim.vertices.Get();
-            item.indices = prim.indices.Get();
-            item.index_format = prim.index_format;
-            item.index_count = prim.index_count;
-            item.constants.joint_offset = offset;
-            const ModelMaterial* mat = prim.material >= 0 ? &model.materials[prim.material] : nullptr;
-            if (mat) {
-                item.constants.alpha_mode = uint32_t(mat->alpha_mode);
-                item.constants.alpha_cutoff = mat->alpha_cutoff;
-                if (const TextureRef* t = mat->slot(0)) {
-                    item.color = model.texture(t->image, renderer);
-                    item.constants.color_uv = uint32_t(t->uv);
-                }
-                for (const TextureRef& t : mat->textures) {
-                    if (t.slot == 0 || t.image < 0)
-                        continue;
-                    const Texture* tex = model.texture(t.image, renderer);
-                    if (tex && model.images[t.image].normal_map) {
-                        item.normal = tex;
-                        item.constants.normal_uv = uint32_t(t.uv);
-                        break;
-                    }
-                }
-                if (const TextureRef* t = mat->slot(debug_slot)) {
-                    item.slot = model.texture(t->image, renderer);
-                    item.constants.slot_uv = uint32_t(t->uv);
-                }
-                if (mat == highlight)
-                    item.constants.flags |= Highlight;
-            }
-            if (item.color)
-                item.constants.flags |= HasColor;
-            if (item.normal)
-                item.constants.flags |= HasNormal;
-            if (item.slot)
-                item.constants.flags |= HasSlot;
             XMVECTOR c = XMVector3Transform(XMVectorSet(prim.center[0], prim.center[1], prim.center[2], 1),
                                             load(joints[offset]));
-            item.depth = -XMVectorGetZ(XMVector3Transform(c, view));
-            items.push_back(item);
+            draws.push_back({&p, pi, offset, -XMVectorGetZ(XMVector3Transform(c, view))});
         }
+    }
+}
+
+void Character::gather(Renderer& renderer, const XMMATRIX& view, std::vector<XMFLOAT4X4>& joints,
+                       std::vector<DrawItem>& items, int debug_slot, const ModelMaterial* highlight) {
+    std::vector<PrimitiveDraw> draws;
+    collect(view, joints, draws);
+    for (auto& d : draws) {
+        GltfModel& model = *d.part->model;
+        const ModelPrimitive& prim = model.primitives[d.primitive];
+        DrawItem item;
+        item.vertices = prim.vertices.Get();
+        item.indices = prim.indices.Get();
+        item.index_format = prim.index_format;
+        item.index_count = prim.index_count;
+        item.constants.joint_offset = d.joint_offset;
+        const ModelMaterial* mat = prim.material >= 0 ? &model.materials[prim.material] : nullptr;
+        if (mat) {
+            item.constants.alpha_mode = uint32_t(mat->alpha_mode);
+            item.constants.alpha_cutoff = mat->alpha_cutoff;
+            if (const TextureRef* t = mat->slot(0)) {
+                item.color = model.texture(t->image, renderer);
+                item.constants.color_uv = uint32_t(t->uv);
+            }
+            for (const TextureRef& t : mat->textures) {
+                if (t.slot == 0 || t.image < 0)
+                    continue;
+                const Texture* tex = model.texture(t.image, renderer);
+                if (tex && model.images[t.image].normal_map) {
+                    item.normal = tex;
+                    item.constants.normal_uv = uint32_t(t.uv);
+                    break;
+                }
+            }
+            if (const TextureRef* t = mat->slot(debug_slot)) {
+                item.slot = model.texture(t->image, renderer);
+                item.constants.slot_uv = uint32_t(t->uv);
+            }
+            if (mat == highlight)
+                item.constants.flags |= Highlight;
+        }
+        if (item.color)
+            item.constants.flags |= HasColor;
+        if (item.normal)
+            item.constants.flags |= HasNormal;
+        if (item.slot)
+            item.constants.flags |= HasSlot;
+        item.depth = d.depth;
+        items.push_back(item);
     }
 }
 

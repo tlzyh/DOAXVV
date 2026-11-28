@@ -37,12 +37,29 @@ std::filesystem::file_time_type newest_shader(const std::filesystem::path& dir) 
     std::filesystem::file_time_type newest{};
     std::error_code ec;
     for (auto& entry : std::filesystem::directory_iterator(dir, ec))
-        if (entry.path().extension() == ".hlsl")
+        if (entry.path().extension() == ".hlsl" || entry.path().extension() == ".hlsli")
             newest = std::max(newest, entry.last_write_time(ec));
     return newest;
 }
 
 }  // namespace
+
+std::vector<D3D11_INPUT_ELEMENT_DESC> vertex_elements() {
+    return {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, position), D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, normal), D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Vertex, tangent), D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, uv0), D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, uv1), D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, uv2), D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"BLENDINDICES", 0, DXGI_FORMAT_R8G8B8A8_UINT, 0, offsetof(Vertex, joints), D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"BLENDINDICES", 1, DXGI_FORMAT_R8G8B8A8_UINT, 0, offsetof(Vertex, joints) + 4, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"BLENDINDICES", 2, DXGI_FORMAT_R8G8B8A8_UINT, 0, offsetof(Vertex, joints) + 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"BLENDWEIGHT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Vertex, weights), D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"BLENDWEIGHT", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Vertex, weights) + 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"BLENDWEIGHT", 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Vertex, weights) + 32, D3D11_INPUT_PER_VERTEX_DATA, 0},
+    };
+}
 
 bool Renderer::init(void* hwnd, int width, int height, std::string& error) {
     width_ = std::max(width, 1);
@@ -97,6 +114,7 @@ bool Renderer::init(void* hwnd, int width, int height, std::string& error) {
     raster.FillMode = D3D11_FILL_SOLID;
     raster.CullMode = D3D11_CULL_NONE;  // every TMC material is exported double sided
     raster.DepthClipEnable = TRUE;
+    raster.FrontCounterClockwise = TRUE;  // outward faces reach the rasterizer counter-clockwise (game_renderer.cpp)
     device_->CreateRasterizerState(&raster, &solid_);
     raster.FillMode = D3D11_FILL_WIREFRAME;
     device_->CreateRasterizerState(&raster, &wire_);
@@ -210,26 +228,13 @@ bool Renderer::reload_shaders(std::string& log) {
     auto pvs = compile(preview, "vs_main", "vs_5_0", log), pps = compile(preview, "ps_main", "ps_5_0", log);
     if (!vs || !ps || !pvs || !pps)
         return false;
-    const D3D11_INPUT_ELEMENT_DESC elements[] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, position), D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, normal), D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Vertex, tangent), D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, uv0), D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, uv1), D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, uv2), D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"BLENDINDICES", 0, DXGI_FORMAT_R8G8B8A8_UINT, 0, offsetof(Vertex, joints), D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"BLENDINDICES", 1, DXGI_FORMAT_R8G8B8A8_UINT, 0, offsetof(Vertex, joints) + 4, D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"BLENDINDICES", 2, DXGI_FORMAT_R8G8B8A8_UINT, 0, offsetof(Vertex, joints) + 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"BLENDWEIGHT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Vertex, weights), D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"BLENDWEIGHT", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Vertex, weights) + 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"BLENDWEIGHT", 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Vertex, weights) + 32, D3D11_INPUT_PER_VERTEX_DATA, 0},
-    };
+    const auto elements = vertex_elements();
     ComPtr<ID3D11VertexShader> new_vs, new_pvs;
     ComPtr<ID3D11PixelShader> new_ps, new_pps;
     ComPtr<ID3D11InputLayout> new_layout;
     if (FAILED(device_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &new_vs)) ||
         FAILED(device_->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &new_ps)) ||
-        FAILED(device_->CreateInputLayout(elements, UINT(std::size(elements)), vs->GetBufferPointer(),
+        FAILED(device_->CreateInputLayout(elements.data(), UINT(elements.size()), vs->GetBufferPointer(),
                                           vs->GetBufferSize(), &new_layout)) ||
         FAILED(device_->CreateVertexShader(pvs->GetBufferPointer(), pvs->GetBufferSize(), nullptr, &new_pvs)) ||
         FAILED(device_->CreatePixelShader(pps->GetBufferPointer(), pps->GetBufferSize(), nullptr, &new_pps))) {

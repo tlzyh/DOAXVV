@@ -24,15 +24,19 @@ const CharacterEntry* current_character(const AppState& app) {
                : nullptr;
 }
 
+}  // namespace
+
 void load_part(AppState& app, PartRole role, const std::string& glb) {
     std::string error;
     if (!app.character.set_part(role, glb, app.catalog.out_dir, *app.renderer, error))
         app.status = error;
+    if (role == PartRole::Costume)
+        app.costume_glb = glb;
+    else if (role == PartRole::Hair)
+        app.hair_glb = glb;
     app.inspect_material = -1;
     app.preview_slot = -1;
 }
-
-}  // namespace
 
 void select_motion(AppState& app, int index) {
     bool had_motion = app.character.clip_count() > 0;
@@ -177,10 +181,49 @@ void motion_panel(AppState& app) {
     ImGui::End();
 }
 
+void simple_settings(AppState& app);
+void game_settings(AppState& app);
+void game_material(AppState& app, Part& part, int index);
+
 void view_panel(AppState& app) {
     ImGui::SetNextWindowPos(ImVec2(350, 10), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(300, 420), ImGuiCond_FirstUseEver);
     ImGui::Begin("显示");
+    ViewSettings& v = app.view;
+    int mode = int(app.render);
+    const char* render_modes[] = {"简单光照", "游戏（抓帧光照）"};
+    if (ImGui::Combo("渲染", &mode, render_modes, IM_ARRAYSIZE(render_modes)))
+        app.render = RenderMode(mode);
+    if (!app.scene.loaded() && !app.scene_error.empty())
+        ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "%s", app.scene_error.c_str());
+    if (app.render == RenderMode::Game && app.scene.loaded())
+        game_settings(app);
+    else
+        simple_settings(app);
+    ImGui::Checkbox("垂直同步", &v.vsync);
+    ImGui::SameLine();
+    if (ImGui::Button("重置视角 (F)"))
+        frame_camera(app);
+    ImGui::TextDisabled("左键旋转  右键/中键平移  滚轮缩放");
+    ImGui::SeparatorText("着色器");
+    ImGui::TextDisabled("%s", app.renderer->shader_dir.string().c_str());
+    if (ImGui::Button("重新编译 (F5)"))
+        reload_all_shaders(app);
+    if (!app.shader_log.empty())
+        ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", app.shader_log.c_str());
+    ImGui::SeparatorText("RenderDoc");
+    if (app.renderdoc) {
+        if (ImGui::Button("抓取一帧 (F11)"))
+            app.renderdoc->TriggerCapture();
+        ImGui::SameLine();
+        ImGui::Text("已抓 %u 帧", app.renderdoc->GetNumCaptures());
+    } else {
+        ImGui::TextDisabled("未加载：用 RenderDoc 启动，或加 --renderdoc");
+    }
+    ImGui::End();
+}
+
+void simple_settings(AppState& app) {
     ViewSettings& v = app.view;
     const char* modes[] = {"光照", "底色（槽位 0）", "法线（含法线图）", "UV0", "贴图槽位", "顶点法线"};
     ImGui::Combo("视图", &v.debug_mode, modes, IM_ARRAYSIZE(modes));
@@ -204,28 +247,78 @@ void view_panel(AppState& app) {
     ImGui::ColorEdit3("地面", v.ground);
     ImGui::SliderFloat("曝光", &v.exposure, 0.1f, 3);
     ImGui::ColorEdit3("背景", v.background);
-    ImGui::Checkbox("垂直同步", &v.vsync);
+}
+
+void game_settings(AppState& app) {
+    GameView& g = app.game_view;
+    GameScene& s = app.scene;
+    const char* views[] = {"最终画面", "G-buffer 底色", "G-buffer 法线", "G-buffer 高光遮罩", "G-buffer 光泽",
+                           "材质 id", "HDR（不含 bloom）", "皮肤光照（模糊前）", "皮肤底色", "皮肤高光",
+                           "bloom", "模板（皮肤/其他）"};
+    static_assert(IM_ARRAYSIZE(views) == GameDebugCount);
+    ImGui::Combo("视图", &g.debug_view, views, IM_ARRAYSIZE(views));
+    ImGui::Checkbox("法线图", &g.normal_maps);
     ImGui::SameLine();
-    if (ImGui::Button("重置视角 (F)"))
-        frame_camera(app);
-    ImGui::TextDisabled("左键旋转  右键/中键平移  滚轮缩放");
-    ImGui::SeparatorText("着色器");
-    ImGui::TextDisabled("%s", app.renderer->shader_dir.string().c_str());
-    if (ImGui::Button("重新编译 (F5)")) {
-        app.renderer->reload_shaders(app.shader_log);
+    ImGui::Checkbox("SSS", &g.sss);
+    ImGui::SameLine();
+    ImGui::Checkbox("bloom", &g.bloom);
+    ImGui::SameLine();
+    ImGui::Checkbox("色调曲线", &g.tone_curve);
+    ImGui::Checkbox("骨骼", &app.view.skeleton);
+    ImGui::SeparatorText("灯光（角色空间，指向光源）");
+    for (int i = 0; i < 3; ++i) {
+        ImGui::PushID(i);
+        char label[32];
+        std::snprintf(label, sizeof(label), "方向 %d", i);
+        ImGui::DragFloat3(label, s.lights[i].dir, 0.01f, -1, 1);
+        std::snprintf(label, sizeof(label), "颜色 %d", i);
+        ImGui::ColorEdit3(label, s.lights[i].color, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+        std::snprintf(label, sizeof(label), "高光/透光 %d", i);
+        ImGui::SliderFloat(label, &s.lights[i].color[3], 0, 2);
+        ImGui::PopID();
     }
-    if (!app.shader_log.empty())
-        ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", app.shader_log.c_str());
-    ImGui::SeparatorText("RenderDoc");
-    if (app.renderdoc) {
-        if (ImGui::Button("抓取一帧 (F11)"))
-            app.renderdoc->TriggerCapture();
-        ImGui::SameLine();
-        ImGui::Text("已抓 %u 帧", app.renderdoc->GetNumCaptures());
-    } else {
-        ImGui::TextDisabled("未加载：用 RenderDoc 启动，或加 --renderdoc");
+    ImGui::ColorEdit3("半球 天空", s.hemi_sky, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+    ImGui::DragFloat3("半球 地面", s.hemi_ground, 0.005f, -1, 1);
+    ImGui::SliderFloat("IBL 强度", &s.ibl_strength, 0, 3);
+    ImGui::SliderFloat("曝光", &s.exposure, 0.1f, 3);
+    ImGui::SliderFloat("bloom 强度", &s.bloom_scale, 0, 6);
+    if (ImGui::Button("恢复抓帧灯光")) {
+        s.reset_lights();
+        s.ibl_strength = 1;
     }
-    ImGui::End();
+    ImGui::ColorEdit3("背景", app.view.background);
+    ImGui::TextDisabled("%s", s.dir.string().c_str());
+    ImGui::TextDisabled("未移植：阴影、点光/聚光、SSAO、景深、LUT、雾");
+}
+
+void game_material(AppState& app, Part& part, int index) {
+    GameScene& s = app.scene;
+    const ModelMaterial& mat = part.model->materials[size_t(index)];
+    GameMaterial& gm = s.material(part, index);
+    ImGui::SeparatorText("游戏渲染");
+    ImGui::TextWrapped("%s", gm.source.c_str());
+    ImGui::Checkbox("隐藏", &gm.hidden);
+    int family = int(gm.family);
+    const char* families[int(GameFamily::Count)];
+    for (int f = 0; f < int(GameFamily::Count); ++f)
+        families[f] = family_name(GameFamily(f));
+    if (ImGui::Combo("着色器族", &family, families, IM_ARRAYSIZE(families)))
+        s.set_family(gm, GameFamily(family), mat);
+    const char* current = gm.pbs >= 0 ? s.pbs[size_t(gm.pbs)].name.c_str() : "抓帧常量";
+    if (ImGui::BeginCombo("PBS 类型", current)) {
+        if (ImGui::Selectable("原值", gm.pbs == gm.original_pbs && gm.passes.size() == gm.original.size()))
+            s.set_pbs(gm, -1);
+        for (int i = 0; i < int(s.pbs.size()); ++i) {
+            char label[96];
+            std::snprintf(label, sizeof(label), "%s  #%d", s.pbs[size_t(i)].name.c_str(), s.pbs[size_t(i)].id);
+            if (ImGui::Selectable(label, i == gm.pbs))
+                s.set_pbs(gm, i);
+        }
+        ImGui::EndCombo();
+    }
+    for (auto& p : gm.passes)
+        ImGui::TextDisabled("%s  深度写 %s  %s  事件 %d", p.blend ? "混合" : "不透明", p.depth_write ? "是" : "否",
+                            p.cull_back ? "剔除背面" : "双面", p.event);
 }
 
 void model_panel(AppState& app) {
@@ -299,6 +392,8 @@ void model_panel(AppState& app) {
 
     if (app.inspect_material >= 0 && app.inspect_material < int(model.materials.size())) {
         const ModelMaterial& mat = model.materials[app.inspect_material];
+        if (app.render == RenderMode::Game && app.scene.loaded())
+            game_material(app, part, app.inspect_material);
         ImGui::SeparatorText("贴图");
         for (int t = 0; t < int(mat.textures.size()); ++t) {
             const TextureRef& ref = mat.textures[t];
@@ -357,6 +452,15 @@ void model_panel(AppState& app) {
 }
 
 }  // namespace
+
+void reload_all_shaders(AppState& app) {
+    bool ok = app.renderer->reload_shaders(app.shader_log);
+    std::string log;
+    if (!app.game.reload(*app.renderer, log))
+        app.shader_log += log.empty() ? "游戏着色器编译失败\n" : log;
+    else if (ok)
+        app.shader_log.clear();
+}
 
 void select_character(AppState& app, int index) {
     if (index < 0 || index >= int(app.catalog.characters.size()))

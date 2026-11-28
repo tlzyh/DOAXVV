@@ -72,6 +72,9 @@ struct DrawItem {
     float depth = 0;  // view depth of the primitive centre, for sorting blended draws
 };
 
+// input layout of Vertex, shared by every mesh vertex shader
+std::vector<D3D11_INPUT_ELEMENT_DESC> vertex_elements();
+
 class Renderer {
 public:
     bool init(void* hwnd, int width, int height, std::string& error);
@@ -102,11 +105,14 @@ public:
     ID3D11DeviceContext* context() const { return context_.Get(); }
     int width() const { return width_; }
     int height() const { return height_; }
+    ID3D11ShaderResourceView* joints() const { return joints_srv_.Get(); }
+    ID3D11RenderTargetView* backbuffer() const { return rtv_ui_.Get(); }  // UNORM view
+
+    ComPtr<ID3DBlob> compile(const std::filesystem::path& file, const char* entry, const char* target,
+                             std::string& log);
 
 private:
     bool create_targets(std::string& error);
-    ComPtr<ID3DBlob> compile(const std::filesystem::path& file, const char* entry, const char* target,
-                             std::string& log);
 
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
