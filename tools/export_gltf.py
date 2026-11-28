@@ -7,9 +7,10 @@
   python tools\\export_gltf.py --name KAS_MIS_za_16_a --motion fe23605cfac8 --clip 1 [--fps 60]
   python tools\\export_gltf.py --name KAS_MIS_za_16_a --name 3dfbeda0 --motion fe23605cfac8:1 --motion 0f64ff100d53:5
 
-Each model becomes out\\models\\<group>\\<name>.glb with its textures decoded to
-PNG in out\\models\\<group>\\<name>_tex\\ (--dds also keeps the BC7 originals).
-With --all, out\\models\\pairing.csv records which TMCL was used for each TMC.
+Each model becomes out\\lib\\model\\<category>\\<name>.glb; its textures are decoded
+to PNG in the shared store out\\lib\\tex\\ (see layout.py; --dds also keeps the
+BC7 originals there). With --all, out\\catalog\\pairing.csv records which TMCL was
+used for each TMC.
 """
 import argparse
 import collections
@@ -28,10 +29,11 @@ from bcdec import decode_dds, write_png
 from decrypt import inflate_all
 from motion import euler_to_quat, hemisphere, motions, quat_mul, quat_rotate
 from tmc import Tmc, TmclView
+import layout
 
 ROOT = r"E:\Games\DMM\DOAX-VenusVacation\DX11_data"
-INDEX = r"D:\Projects\YangHui\DOAXVV\index.csv"
-OUT = r"D:\Projects\YangHui\DOAXVV\out\models"
+INDEX = layout.INDEX
+OUT = layout.OUT
 
 FLOAT, UBYTE, USHORT, UINT = 5126, 5121, 5123, 5125
 ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER = 34962, 34963
@@ -46,15 +48,6 @@ def read_inflated(row):
 def variant_stem(name):
     """KAS_MIS_za_16_a and KAS_MIS_za_16_c share the stem KAS_MIS_za_16."""
     return re.sub(r"_[a-z]$", "", name)
-
-
-def group_of(name):
-    parts = name.split("_")
-    if len(parts) > 1 and len(parts[1]) == 3 and parts[1].isalpha() and parts[1].isupper():
-        return parts[1]
-    if len(parts[0]) == 3 and parts[0].isalpha() and parts[0].isupper():
-        return parts[0]
-    return "misc"
 
 
 class GltfBuilder:
@@ -295,7 +288,6 @@ def export_model(tmc, view, glb_path, textures=True, keep_dds=False, animations=
     roots = [node.index for node in tmc.nodes if node.parent < 0]
     doc["scenes"][0]["nodes"].extend(roots)
 
-    tex_dir = os.path.splitext(glb_path)[0] + "_tex"
     texture_ids = {}
     cutout = {}
 
@@ -304,21 +296,23 @@ def export_model(tmc, view, glb_path, textures=True, keep_dds=False, animations=
             return texture_ids[index]
         if not textures or index >= view.texture_count():
             return None
-        os.makedirs(tex_dir, exist_ok=True)
         data = view.texture(index)
-        if keep_dds:
-            with open(os.path.join(tex_dir, "%02d.dds" % index), "wb") as handle:
-                handle.write(data)
         try:
             rgba, _fmt = decode_dds(data)
         except (ValueError, struct.error):
             texture_ids[index] = None
             return None
-        filename = "%02d.png" % index
-        write_png(os.path.join(tex_dir, filename), rgba, level=3)
+        os.makedirs(layout.TEX, exist_ok=True)
+        tmp = os.path.join(layout.TEX, "_tmp_%d_%d.png" % (os.getpid(), index))
+        write_png(tmp, rgba, level=3)
+        md5 = layout.store_texture(tmp)
+        if keep_dds:
+            with open(layout.tex_path(md5)[:-4] + ".dds", "wb") as handle:
+                handle.write(data)
         alpha = rgba[..., 3]
         cutout[index] = ((alpha < 16).mean() > 0.05, (alpha >= 240).mean() > 0.05)
-        doc["images"].append({"uri": os.path.basename(tex_dir) + "/" + filename, "mimeType": "image/png"})
+        doc["images"].append({"uri": layout.tex_uri(md5), "mimeType": "image/png",
+                              "extras": {"tmcl_texture": index}})
         doc["textures"].append({"sampler": 0, "source": len(doc["images"]) - 1})
         texture_ids[index] = len(doc["textures"]) - 1
         return texture_ids[index]
@@ -420,11 +414,12 @@ def load_index():
         if row["magic"] == "TMCL" and row["plain_size"]:
             tmcl[int(row["plain_size"])].append(row)
     tmcs = [row for row in rows if row["magic"] == "TMC"]
-    pairs = os.path.join(os.path.dirname(OUT), "tmc_pairs.csv")
+    pairs = os.path.join(OUT, "tmc_pairs.csv")
     if os.path.exists(pairs):
         by_hash = {row["hash"]: row for row in rows if row["magic"] == "TMCL"}
         tmcl["official"] = {r["tmc"]: by_hash[r["tmcl"]] for r in csv.DictReader(open(pairs, encoding="utf-8"))
                             if r["tmcl"] in by_hash}
+    tmcl["types"] = layout.directory_types()
     return tmcs, tmcl
 
 
@@ -488,7 +483,7 @@ def character_id(char):
     """'mis' or '11' / '0x0b' -> character id (chr_characters.csv)."""
     if re.fullmatch(r"\d+|0x[0-9a-fA-F]+", char):
         return int(char, 0)
-    path = os.path.join(os.path.dirname(OUT), "chr_characters.csv")
+    path = os.path.join(OUT, "chr_characters.csv")
     if not os.path.exists(path):
         raise SystemExit("run tools\\chr_data.py first")
     for r in csv.DictReader(open(path, encoding="utf-8")):
@@ -522,7 +517,7 @@ def add_partners(specs, char=None):
     Uses out\\chr_motion_sets.csv (the game's own mot table, tools\\chr_data.py) when present,
     otherwise the clip-length guess in out\\motion_sets.csv (unique pairs only).
     """
-    official = os.path.join(os.path.dirname(OUT), "chr_motion_sets.csv")
+    official = os.path.join(OUT, "chr_motion_sets.csv")
     if os.path.exists(official):
         sets = list(csv.DictReader(open(official, encoding="utf-8")))
         char_id = character_id(char) if char else None
@@ -536,7 +531,7 @@ def add_partners(specs, char=None):
                 continue
             out.extend(h[:16] + sep + clips for h in partners if not any(s.startswith(h[:16]) for s in out))
         return out
-    sets = os.path.join(os.path.dirname(OUT), "motion_sets.csv")
+    sets = os.path.join(OUT, "motion_sets.csv")
     if not os.path.exists(sets):
         raise SystemExit("run tools\\pair_motion.py first")
     rows = list(csv.DictReader(open(sets, encoding="utf-8")))
@@ -602,7 +597,7 @@ def export_row(task):
         view, tmcl_row, matches = pair_tmcl(tmc, candidates.get(tmc.tmcl_size, []), rank)
     if view is None:
         return (tmc.name, row["folder"], row["hash"], "", "", 0, "no tmcl (%d by size)" % len(candidates.get(tmc.tmcl_size, [])))
-    path = os.path.join(OUT, group_of(tmc.name), out_name + ".glb")
+    path = layout.model_path(layout.category_of(row["hash"], candidates.get("types", {})), out_name)
     if skip_existing and os.path.exists(path):
         return (tmc.name, row["folder"], row["hash"], tmcl_row["folder"], tmcl_row["hash"], matches, "ok skipped")
     try:
@@ -654,7 +649,7 @@ def main():
     variants = collections.defaultdict(list)
     for row in sorted(tmcs, key=lambda r: (r["name"], r["hash"])):
         variants[(row["plain_size"], variant_stem(row["name"]))].append(row["hash"])
-    log = os.path.join(OUT, "pairing.csv")
+    log = os.path.join(layout.CATALOG, "pairing.csv")
     kept = []
     if args.retry_failed:
         previous = [tuple(r.values()) for r in csv.DictReader(open(log, encoding="utf-8"))]
@@ -683,7 +678,7 @@ def main():
                 if done % 100 == 0:
                     print("models", done, "/", len(tasks), flush=True)
     if args.all:
-        os.makedirs(OUT, exist_ok=True)
+        os.makedirs(layout.CATALOG, exist_ok=True)
         with open(log, "w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(("name", "tmc_folder", "tmc_hash", "tmcl_folder", "tmcl_hash", "tmcl_matches", "result"))
