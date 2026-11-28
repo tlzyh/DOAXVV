@@ -419,6 +419,11 @@ def load_index():
         if row["magic"] == "TMCL" and row["plain_size"]:
             tmcl[int(row["plain_size"])].append(row)
     tmcs = [row for row in rows if row["magic"] == "TMC"]
+    pairs = os.path.join(os.path.dirname(OUT), "tmc_pairs.csv")
+    if os.path.exists(pairs):
+        by_hash = {row["hash"]: row for row in rows if row["magic"] == "TMCL"}
+        tmcl["official"] = {r["tmc"]: by_hash[r["tmcl"]] for r in csv.DictReader(open(pairs, encoding="utf-8"))
+                            if r["tmcl"] in by_hash}
     return tmcs, tmcl
 
 
@@ -478,8 +483,58 @@ def load_bank_clips(spec, default_clips):
     return out
 
 
-def add_partners(specs):
-    """Append the hand / breast files paired with each body file in out\\motion_sets.csv (unique pairs only)."""
+def character_id(char):
+    """'mis' or '11' / '0x0b' -> character id (chr_characters.csv)."""
+    if re.fullmatch(r"\d+|0x[0-9a-fA-F]+", char):
+        return int(char, 0)
+    path = os.path.join(os.path.dirname(OUT), "chr_characters.csv")
+    if not os.path.exists(path):
+        raise SystemExit("run tools\\chr_data.py first")
+    for r in csv.DictReader(open(path, encoding="utf-8")):
+        if r["code"] == char.lower():
+            return int(r["char_id"])
+    raise SystemExit("no character %s in chr_characters.csv" % char)
+
+
+def official_partners(prefix, sets, char_id=None):
+    """Face / hand / breast banks that the game's mot table plays with body `prefix` (most common set)."""
+    found = collections.Counter()
+    for row in sets:
+        if char_id is not None and int(row["id"], 16) & 0xFFFF != char_id:
+            continue
+        banks = row["banks"].split()
+        kinds = row["kinds"].split()
+        if not any(h.startswith(prefix) and k == "body" for h, k in zip(banks, kinds)):
+            continue
+        found[tuple(h for h, k in zip(banks, kinds) if k in ("face", "hand", "breast"))] += 1
+    if not found:
+        return None
+    if len(found) > 1:
+        print("body motion %s appears in %d mot rows with %d partner sets; using the most common "
+              "(pick one with --char)" % (prefix, sum(found.values()), len(found)))
+    return list(found.most_common(1)[0][0])
+
+
+def add_partners(specs, char=None):
+    """Append the face / hand / breast files the game plays with each body file.
+
+    Uses out\\chr_motion_sets.csv (the game's own mot table, tools\\chr_data.py) when present,
+    otherwise the clip-length guess in out\\motion_sets.csv (unique pairs only).
+    """
+    official = os.path.join(os.path.dirname(OUT), "chr_motion_sets.csv")
+    if os.path.exists(official):
+        sets = list(csv.DictReader(open(official, encoding="utf-8")))
+        char_id = character_id(char) if char else None
+        out = list(specs)
+        for spec in specs:
+            prefix, sep, clips = spec.partition(":")
+            partners = official_partners(prefix, sets, char_id)
+            if partners is None:
+                if char_id is not None:
+                    print("body motion %s is not in character %s's mot table" % (prefix, char))
+                continue
+            out.extend(h[:16] + sep + clips for h in partners if not any(s.startswith(h[:16]) for s in out))
+        return out
     sets = os.path.join(os.path.dirname(OUT), "motion_sets.csv")
     if not os.path.exists(sets):
         raise SystemExit("run tools\\pair_motion.py first")
@@ -517,6 +572,9 @@ def attach_rig(animations, rows):
                 for _name, banks, _fps, _rig in animations]
         if any(rig is not None for rig in rigs):
             return [(name, banks, fps, rig) for (name, banks, fps, _old), rig in zip(animations, rigs)]
+    if any(m.node_count == 21 for _name, banks, _fps, _rig in animations for m, _c in banks):
+        print("no body model among --name; hair and face roots will not follow the body motion "
+              "(export them together with the body)")
     return animations
 
 
@@ -534,7 +592,13 @@ def export_row(task):
         tmc = Tmc(read_inflated(row))
     except (KeyError, ValueError, struct.error) as exc:
         return (row["name"], row["folder"], row["hash"], "", "", 0, "tmc error: %s" % exc)
-    view, tmcl_row, matches = pair_tmcl(tmc, candidates.get(tmc.tmcl_size, []), rank)
+    official = candidates.get("official", {}).get(row["hash"])
+    view = None
+    if official is not None:
+        view, tmcl_row, _n = pair_tmcl(tmc, [official])
+        matches = "official"
+    if view is None:
+        view, tmcl_row, matches = pair_tmcl(tmc, candidates.get(tmc.tmcl_size, []), rank)
     if view is None:
         return (tmc.name, row["folder"], row["hash"], "", "", 0, "no tmcl (%d by size)" % len(candidates.get(tmc.tmcl_size, [])))
     path = os.path.join(OUT, group_of(tmc.name), out_name + ".glb")
@@ -566,10 +630,12 @@ def main():
                         help="clip index in the motion bank (repeatable; default: first clip longer than 1 frame)")
     parser.add_argument("--fps", type=float, default=60.0, help="motion frames per second (default 60)")
     parser.add_argument("--paired", action="store_true",
-                        help="also load the hand / breast motions paired with each body --motion (motion_sets.csv)")
+                        help="also load the face / hand / breast motions the game plays with each body --motion "
+                             "(chr_motion_sets.csv, else the clip-length guess in motion_sets.csv)")
+    parser.add_argument("--char", help="with --paired: character code (mis, kas, ...) or id whose mot table to use")
     args = parser.parse_args()
     if args.paired:
-        args.motion = add_partners(args.motion)
+        args.motion = add_partners(args.motion, args.char)
     animations = load_animations(args.motion, args.clip, args.fps) if args.motion else None
     if animations and args.all:
         parser.error("--motion only works with --name")
@@ -625,7 +691,7 @@ def main():
         log = ""
     status = collections.Counter(result[6].split(" ")[0] if result[6].startswith("ok") else result[6].split(" (")[0].split(":")[0]
                                  for result in results)
-    ambiguous = sum(1 for result in results if result[5] > 1)
+    ambiguous = sum(1 for result in results if isinstance(result[5], int) and result[5] > 1)
     print("models", len(results), dict(status), "ambiguous tmcl", ambiguous, "log", log or "-")
     for result in results[:10]:
         print(" ", result[0], result[6], "tmcl", result[4][:16], "matches", result[5])
