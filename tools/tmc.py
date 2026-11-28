@@ -106,6 +106,7 @@ class Submesh:
         self.decl = u32(buf, off + 0x3C)
         self.index_start, self.index_count, self.vertex_start, self.vertex_count = struct.unpack_from(
             "<4I", buf, off + 0x80)
+        self.raw = list(struct.unpack_from("<36I", buf, off))
 
 
 class ObjGeo:

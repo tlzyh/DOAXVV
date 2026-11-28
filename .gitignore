@@ -193,6 +193,7 @@ Loose/
 #
 # Keep this rule last: git applies the last matching pattern.
 !/Source/**
+!/viewer/third_party/**
 
 __pycache__/
 export/

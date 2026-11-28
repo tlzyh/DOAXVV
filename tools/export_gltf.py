@@ -385,6 +385,7 @@ def export_model(tmc, view, glb_path, textures=True, keep_dds=False, animations=
                 "indices": gltf.accessor(indices.astype(np.uint16), "SCALAR", USHORT, ELEMENT_ARRAY_BUFFER),
                 "material": material_id(submesh),
                 "mode": 4,
+                "extras": {"submesh": submesh.index, "submesh_raw": submesh.raw},
             })
         if not primitives:
             continue

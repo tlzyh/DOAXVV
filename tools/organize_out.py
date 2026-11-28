@@ -15,6 +15,7 @@ out\\catalog\\ (paths relative to out\\, layout.py):
   char_costumes.csv   char_costumes.py
   motion_sets.csv     copy of out\\chr_motion_sets.csv
   pairing.csv         written by export_gltf.py --all
+  motions.csv         written by export_motion.py (one row per exported .vmot)
 """
 import csv
 import json
