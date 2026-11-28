@@ -11,7 +11,7 @@ out\\catalog\\char_costumes.csv with the columns
 
 local = no means the files are neither in the game folders nor in cdn\\
 (tools\\cdn_fetch.py downloads them). glb is relative to out\\ (layout.py).
-organize_out.py --catalog runs this as part of the catalog.
+organize_out.py runs this as part of the catalog.
 """
 import collections
 import csv
@@ -29,7 +29,7 @@ def write(glb_of=None):
         types = layout.directory_types()
         glb_of = {}
         for h, name in layout.out_names(tmcs).items():
-            path = layout.model_path(layout.category_of(h, types), name)
+            path = layout.model_path(layout.category_of(h, types), layout.group_of(index[h]["name"]), name)
             glb_of[h] = layout.rel(path) if os.path.exists(path) else ""
     codes = {int(r["char_id"]): r["code"] or r["face_name"].split("_")[0].lower()
              for r in csv.DictReader(open(os.path.join(layout.OUT, "chr_characters.csv")))}

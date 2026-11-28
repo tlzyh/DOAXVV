@@ -8,8 +8,9 @@ The URL of every file follows from the archive directory (out\\archive_dir.csv):
   https://cdn01.doax-venusvacation.jp/production/resource_data/<b>/<folder>/<hash>
 
 where b is the record's resource version (decimal). Targets are all keys in the
-cos and hair rows of out\\chr_data (TMC, TMCL, tdpack, ...) that are neither in
-the game folders nor already in cdn\\. Files are written to
+cos, hair, chrall and mot rows of out\\chr_data (costume / hair / face TMC and
+TMCL, tdpack, char_dat motions, ...; type 59 icons are skipped) that are neither
+in the game folders nor already in cdn\\. Files are written to
 D:\\Projects\\YangHui\\DOAXVV\\cdn\\<folder>\\<hash> only after their size matches
 the record's stored size; reruns skip finished files. The game folder is never
 touched. Results go to out\\cdn_fetch.csv.
@@ -26,6 +27,8 @@ OUT = os.path.join(REPO, "out")
 CDN = os.path.join(REPO, "cdn")
 GAME = r"E:\Games\DMM\DOAX-VenusVacation\DX11_data"
 URL = "https://cdn01.doax-venusvacation.jp/production/resource_data/%d/%s/%s"
+SECTIONS = ("cos", "hair", "chrall", "mot")
+SKIP_TYPES = {"59"}
 
 
 def char_ids(codes):
@@ -41,13 +44,12 @@ def char_ids(codes):
 def targets(args):
     chars = char_ids(args.char) if args.char else None
     hashes = set()
-    for section in ("cos", "hair"):
+    for section in SECTIONS:
         for r in csv.DictReader(open(os.path.join(OUT, "chr_data", section + ".csv"))):
             if chars is not None and int(r["id"], 16) & 0xFFFF not in chars:
                 continue
-            for i in range(1, 8):
-                w = r["w%d" % i]
-                if ":" in w:
+            for key, w in r.items():
+                if key.startswith("w") and w and ":" in w and w.partition(":")[0] not in SKIP_TYPES:
                     hashes.add(w.rpartition("/")[2])
     if args.hash:
         hashes = {h for h in hashes if any(h.startswith(p) for p in args.hash)} if chars is not None else \
@@ -59,6 +61,9 @@ def targets(args):
             continue
         folder = r["folder"]
         if any(os.path.exists(os.path.join(GAME, sub, folder, r["hash"])) for sub in ("", "DL")):
+            continue
+        have = os.path.join(CDN, folder, r["hash"])
+        if os.path.exists(have) and os.path.getsize(have) == int(r["stored"]):
             continue
         out.append((int(r["b"], 16), folder, r["hash"], int(r["stored"])))
     return sorted(set(out))

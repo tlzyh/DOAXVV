@@ -115,10 +115,8 @@ def write_tmc_pairs(buf, keys):
 
 
 def tmc_names():
-    path = os.path.join(OUT, "models", "pairing.csv")
-    if not os.path.exists(path):
-        return {}
-    return {r["tmc_hash"]: r["name"] for r in csv.DictReader(open(path, encoding="utf-8"))}
+    path = os.path.join(os.path.dirname(OUT), "index.csv")
+    return {r["hash"]: r["name"] for r in csv.DictReader(open(path, encoding="utf-8")) if r["magic"] == "TMC"}
 
 
 def write_characters(buf, chrall, keys):

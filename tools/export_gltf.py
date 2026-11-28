@@ -3,14 +3,15 @@
 
   python tools\\export_gltf.py --name KAS_MIS_za_16_a
   python tools\\export_gltf.py --all [--workers 8] [--no-textures] [--dds]
-  python tools\\export_gltf.py --all --retry-failed   (only TMCs not yet ok in pairing.csv, e.g. new cdn files)
+  python tools\\export_gltf.py --all --retry-failed   (only TMCs not yet ok in pairing.csv or whose glb is
+                                                     not at its current path, e.g. new or renamed files)
   python tools\\export_gltf.py --name KAS_MIS_za_16_a --motion fe23605cfac8 --clip 1 [--fps 60]
   python tools\\export_gltf.py --name KAS_MIS_za_16_a --name 3dfbeda0 --motion fe23605cfac8:1 --motion 0f64ff100d53:5
 
-Each model becomes out\\lib\\model\\<category>\\<name>.glb; its textures are decoded
-to PNG in the shared store out\\lib\\tex\\ (see layout.py; --dds also keeps the
-BC7 originals there). With --all, out\\catalog\\pairing.csv records which TMCL was
-used for each TMC.
+Each model becomes out\\models\\<category>\\<group>\\<name>.glb with its textures
+decoded to <name>_tex\\NN.png next to it, NN being the texture's order in the TMCL
+(see layout.py; --dds also keeps the BC7 originals as NN.dds). With --all,
+out\\catalog\\pairing.csv records which TMCL was used for each TMC.
 """
 import argparse
 import collections
@@ -302,16 +303,16 @@ def export_model(tmc, view, glb_path, textures=True, keep_dds=False, animations=
         except (ValueError, struct.error):
             texture_ids[index] = None
             return None
-        os.makedirs(layout.TEX, exist_ok=True)
-        tmp = os.path.join(layout.TEX, "_tmp_%d_%d.png" % (os.getpid(), index))
-        write_png(tmp, rgba, level=3)
-        md5 = layout.store_texture(tmp)
+        tex_dir = layout.tex_dir(glb_path)
+        os.makedirs(tex_dir, exist_ok=True)
+        filename = "%02d.png" % index
+        write_png(os.path.join(tex_dir, filename), rgba, level=3)
         if keep_dds:
-            with open(layout.tex_path(md5)[:-4] + ".dds", "wb") as handle:
+            with open(os.path.join(tex_dir, "%02d.dds" % index), "wb") as handle:
                 handle.write(data)
         alpha = rgba[..., 3]
         cutout[index] = ((alpha < 16).mean() > 0.05, (alpha >= 240).mean() > 0.05)
-        doc["images"].append({"uri": layout.tex_uri(md5), "mimeType": "image/png",
+        doc["images"].append({"uri": os.path.basename(tex_dir) + "/" + filename, "mimeType": "image/png",
                               "extras": {"tmcl_texture": index}})
         doc["textures"].append({"sampler": 0, "source": len(doc["images"]) - 1})
         texture_ids[index] = len(doc["textures"]) - 1
@@ -597,7 +598,8 @@ def export_row(task):
         view, tmcl_row, matches = pair_tmcl(tmc, candidates.get(tmc.tmcl_size, []), rank)
     if view is None:
         return (tmc.name, row["folder"], row["hash"], "", "", 0, "no tmcl (%d by size)" % len(candidates.get(tmc.tmcl_size, [])))
-    path = layout.model_path(layout.category_of(row["hash"], candidates.get("types", {})), out_name)
+    path = layout.model_path(layout.category_of(row["hash"], candidates.get("types", {})),
+                             layout.group_of(row["name"]), out_name)
     if skip_existing and os.path.exists(path):
         return (tmc.name, row["folder"], row["hash"], tmcl_row["folder"], tmcl_row["hash"], matches, "ok skipped")
     try:
@@ -616,7 +618,8 @@ def main():
     parser.add_argument("--no-textures", action="store_true")
     parser.add_argument("--skip-existing", action="store_true", help="keep .glb files that are already exported")
     parser.add_argument("--retry-failed", action="store_true",
-                        help="with --all: only redo models whose pairing.csv result is not ok, keep the rest")
+                        help="with --all: only redo models whose pairing.csv result is not ok or whose glb is "
+                             "missing at its current path, keep the rest")
     parser.add_argument("--dds", action="store_true", help="also keep the original BC7 DDS next to each PNG")
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     parser.add_argument("--motion", action="append", default=[],
@@ -655,18 +658,24 @@ def main():
         previous = [tuple(r.values()) for r in csv.DictReader(open(log, encoding="utf-8"))]
         kept = [r for r in previous if r[6].startswith("ok")]
         done_hashes = {r[2] for r in kept}
-    used = collections.Counter()
+    names = layout.out_names(tmcs)
+    seen = set()
     tasks = []
     for row in sorted(chosen, key=lambda r: (r["name"], os.path.isabs(r["folder"]), r["folder"], r["hash"])):
-        base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["name"]) or row["hash"][:16]
-        used[base] += 1
-        out_name = base if used[base] == 1 else "%s__%s" % (base, row["hash"][:8])
+        if row["hash"] in seen:
+            continue
+        seen.add(row["hash"])
+        out_name = names[row["hash"]]
         if animations:
             out_name += "_anim"
-        if args.retry_failed and row["hash"] in done_hashes:
+        if args.retry_failed and row["hash"] in done_hashes and os.path.exists(
+                layout.model_path(layout.category_of(row["hash"], tmcl["types"]), layout.group_of(row["name"]),
+                                  out_name)):
             continue
         rank = variants[(row["plain_size"], variant_stem(row["name"]))].index(row["hash"])
         tasks.append((row, rank, not args.no_textures, args.dds, out_name, args.skip_existing, animations))
+    redo = {task[0]["hash"] for task in tasks}
+    kept = [r for r in kept if r[2] in names and r[2] not in redo]
     results = []
     if len(tasks) == 1 or args.workers == 1:
         init_worker(tmcl)
