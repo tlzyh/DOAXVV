@@ -18,7 +18,10 @@ from decrypt import decrypt, first_page, key_from_index, magic_of, recover_key, 
 
 ROOT = r"E:\Games\DMM\DOAX-VenusVacation\DX11_data"
 OUT = r"D:\Projects\YangHui\DOAXVV\index.csv"
-FOLDERS = ("COMMON", "HIGH", os.path.join("DL", "COMMON"), os.path.join("DL", "HIGH"))
+CDN = os.path.join(os.path.dirname(OUT), "cdn")
+# absolute cdn paths survive os.path.join(ROOT, folder) everywhere index.csv is read
+FOLDERS = ("COMMON", "HIGH", os.path.join("DL", "COMMON"), os.path.join("DL", "HIGH"),
+           os.path.join(CDN, "COMMON"), os.path.join(CDN, "HIGH"))
 ASF = bytes.fromhex("3026b2758e66cf11a6d900aa0062ce6c")
 RAW_MAGICS = {ASF: "ASF", b"BIN2": "BIN2"}
 PLAIN_MAGICS = {ASF: "ASF", b"_L1G": "G1L"}

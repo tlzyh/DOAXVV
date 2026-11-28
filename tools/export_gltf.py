@@ -3,6 +3,7 @@
 
   python tools\\export_gltf.py --name KAS_MIS_za_16_a
   python tools\\export_gltf.py --all [--workers 8] [--no-textures] [--dds]
+  python tools\\export_gltf.py --all --retry-failed   (only TMCs not yet ok in pairing.csv, e.g. new cdn files)
   python tools\\export_gltf.py --name KAS_MIS_za_16_a --motion fe23605cfac8 --clip 1 [--fps 60]
   python tools\\export_gltf.py --name KAS_MIS_za_16_a --name 3dfbeda0 --motion fe23605cfac8:1 --motion 0f64ff100d53:5
 
@@ -661,7 +662,7 @@ def main():
         done_hashes = {r[2] for r in kept}
     used = collections.Counter()
     tasks = []
-    for row in sorted(chosen, key=lambda r: (r["name"], r["folder"], r["hash"])):
+    for row in sorted(chosen, key=lambda r: (r["name"], os.path.isabs(r["folder"]), r["folder"], r["hash"])):
         base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["name"]) or row["hash"][:16]
         used[base] += 1
         out_name = base if used[base] == 1 else "%s__%s" % (base, row["hash"][:8])

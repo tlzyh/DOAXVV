@@ -44,7 +44,7 @@ def glb_paths(index):
     used = collections.Counter()
     paths = {}
     tmcs = [r for r in index.values() if r["magic"] == "TMC"]
-    for row in sorted(tmcs, key=lambda r: (r["name"], r["folder"], r["hash"])):
+    for row in sorted(tmcs, key=lambda r: (r["name"], os.path.isabs(r["folder"]), r["folder"], r["hash"])):
         base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["name"]) or row["hash"][:16]
         used[base] += 1
         out_name = base if used[base] == 1 else "%s__%s" % (base, row["hash"][:8])
