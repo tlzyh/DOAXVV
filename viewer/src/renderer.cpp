@@ -216,6 +216,7 @@ bool Renderer::reload_shaders(std::string& log) {
         {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(Vertex, tangent), D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, uv0), D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, uv1), D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, uv2), D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"BLENDINDICES", 0, DXGI_FORMAT_R8G8B8A8_UINT, 0, offsetof(Vertex, joints), D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"BLENDINDICES", 1, DXGI_FORMAT_R8G8B8A8_UINT, 0, offsetof(Vertex, joints) + 4, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"BLENDINDICES", 2, DXGI_FORMAT_R8G8B8A8_UINT, 0, offsetof(Vertex, joints) + 8, D3D11_INPUT_PER_VERTEX_DATA, 0},

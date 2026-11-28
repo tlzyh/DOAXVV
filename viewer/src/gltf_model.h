@@ -42,6 +42,7 @@ struct ModelImage {
     int tmcl_texture = -1;
     std::shared_ptr<Texture> texture;  // loaded on first use
     bool failed = false;
+    bool normal_map = false;  // set on load from the average color
 };
 
 struct ModelPrimitive {

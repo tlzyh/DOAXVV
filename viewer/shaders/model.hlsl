@@ -43,6 +43,7 @@ struct VSIn
     float4 tangent : TANGENT;
     float2 uv0 : TEXCOORD0;
     float2 uv1 : TEXCOORD1;
+    float2 uv2 : TEXCOORD2;
     uint4 j0 : BLENDINDICES0;
     uint4 j1 : BLENDINDICES1;
     uint4 j2 : BLENDINDICES2;
@@ -59,6 +60,7 @@ struct PSIn
     float4 tangent : TANGENT;
     float2 uv0 : TEXCOORD0;
     float2 uv1 : TEXCOORD1;
+    float2 uv2 : TEXCOORD2;
 };
 
 float4x4 joint_matrix(uint index)
@@ -84,10 +86,11 @@ PSIn vs_main(VSIn v)
     o.tangent = float4(mul(v.tangent.xyz, (float3x3)skin), v.tangent.w);
     o.uv0 = v.uv0;
     o.uv1 = v.uv1;
+    o.uv2 = v.uv2;
     return o;
 }
 
-float2 pick_uv(PSIn p, uint set) { return set == 1 ? p.uv1 : p.uv0; }
+float2 pick_uv(PSIn p, uint set) { return set == 2 ? p.uv2 : set == 1 ? p.uv1 : p.uv0; }
 
 // The target is sRGB: data textures (and alpha) are shown with their stored byte values.
 float4 channel_view(float4 c)

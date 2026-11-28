@@ -193,7 +193,7 @@ void view_panel(AppState& app) {
     ImGui::SameLine();
     ImGui::Checkbox("骨骼", &v.skeleton);
     ImGui::SameLine();
-    ImGui::Checkbox("法线图（槽位 2）", &v.normal_maps);
+    ImGui::Checkbox("法线图", &v.normal_maps);
     ImGui::SeparatorText("灯光");
     ImGui::SliderAngle("方位", &v.light_yaw, -180, 180);
     ImGui::SliderAngle("仰角", &v.light_pitch, -89, 89);
@@ -304,8 +304,9 @@ void model_panel(AppState& app) {
             const TextureRef& ref = mat.textures[t];
             char label[200];
             std::string file = ref.image >= 0 ? model.images[ref.image].path.filename().string() : "(未导出)";
-            std::snprintf(label, sizeof(label), "槽位 %d  uv %d  TMCL #%d  %s", ref.slot, ref.uv, ref.tmcl_texture,
-                          file.c_str());
+            bool normal = ref.image >= 0 && model.images[ref.image].normal_map;
+            std::snprintf(label, sizeof(label), "槽位 %d  uv %d  TMCL #%d  %s%s", ref.slot, ref.uv, ref.tmcl_texture,
+                          file.c_str(), normal ? "  [法线]" : "");
             if (ImGui::Selectable(label, app.preview_slot == t))
                 app.preview_slot = t;
         }

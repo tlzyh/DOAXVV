@@ -23,6 +23,7 @@ struct Vertex {
     float tangent[4];
     float uv0[2];
     float uv1[2];
+    float uv2[2];
     uint8_t joints[12];
     float weights[12];
 };

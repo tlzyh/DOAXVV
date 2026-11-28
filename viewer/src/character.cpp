@@ -98,7 +98,7 @@ bool Character::set_motion(const std::vector<std::pair<std::string, std::string>
     for (auto& [hash, kind] : banks) {
         auto it = motion_files.find(hash);
         if (it == motion_files.end()) {
-            // "?" banks are not motion data survey_motion.py could parse; export_motion.py skips them too
+            // "?" entries of a mot row are not char_dat files, so export_motion.py has nothing for them
             if (kind != "?")
                 error = "motion " + hash.substr(0, 12) + " is not exported (run tools\\export_motion.py)";
             continue;
@@ -261,9 +261,15 @@ void Character::gather(Renderer& renderer, const XMMATRIX& view, std::vector<XMF
                     item.color = model.texture(t->image, renderer);
                     item.constants.color_uv = uint32_t(t->uv);
                 }
-                if (const TextureRef* t = mat->slot(2)) {
-                    item.normal = model.texture(t->image, renderer);
-                    item.constants.normal_uv = uint32_t(t->uv);
+                for (const TextureRef& t : mat->textures) {
+                    if (t.slot == 0 || t.image < 0)
+                        continue;
+                    const Texture* tex = model.texture(t.image, renderer);
+                    if (tex && model.images[t.image].normal_map) {
+                        item.normal = tex;
+                        item.constants.normal_uv = uint32_t(t.uv);
+                        break;
+                    }
                 }
                 if (const TextureRef* t = mat->slot(debug_slot)) {
                     item.slot = model.texture(t->image, renderer);

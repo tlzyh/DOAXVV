@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 #include <cstring>
 
 namespace {
@@ -177,6 +178,8 @@ bool GltfModel::load(const std::filesystem::path& file, Renderer& renderer, std:
                                 cgltf_accessor_read_float(acc, k, v.uv0, 2);
                             else if (attr.index == 1)
                                 cgltf_accessor_read_float(acc, k, v.uv1, 2);
+                            else if (attr.index == 2)
+                                cgltf_accessor_read_float(acc, k, v.uv2, 2);
                             break;
                         case cgltf_attribute_type_joints:
                             if (attr.index < 3) {
@@ -253,12 +256,20 @@ const Texture* GltfModel::texture(int image, Renderer& renderer) {
     if (img.texture || img.failed)
         return img.texture.get();
     int w = 0, h = 0, n = 0;
-    std::string utf8 = img.path.string();
-    unsigned char* pixels = stbi_load(utf8.c_str(), &w, &h, &n, 4);
+    std::u8string utf8 = img.path.u8string();
+    unsigned char* pixels = stbi_load(reinterpret_cast<const char*>(utf8.c_str()), &w, &h, &n, 4);
     if (!pixels) {
         img.failed = true;
         return nullptr;
     }
+    // TMC slots differ per shader, so tangent-space normal maps are told apart by their content
+    double sum[3] = {};
+    size_t count = size_t(w) * size_t(h), step = std::max<size_t>(1, count / 4096), samples = 0;
+    for (size_t k = 0; k < count; k += step, ++samples)
+        for (int c = 0; c < 3; ++c)
+            sum[c] += pixels[k * 4 + c] / 255.0;
+    double r = sum[0] / samples, g = sum[1] / samples, b = sum[2] / samples;
+    img.normal_map = b > 0.75 && std::abs(r - 0.5) < 0.12 && std::abs(g - 0.5) < 0.12;
     img.texture = renderer.create_texture(pixels, w, h);
     stbi_image_free(pixels);
     img.failed = !img.texture;
